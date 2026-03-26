@@ -14,14 +14,24 @@ NODE_BASE="/opt/openclaw/node"
 OC_GLOBAL="/opt/openclaw/global"
 OC_DATA="/opt/openclaw/data"
 
+# ── 自定义挂载点支持 ──
+# 从 UCI 读取用户设置的 mount_point，覆盖默认的 /opt
+_OC_UCI_MP=$(uci -q get openclaw.main.mount_point 2>/dev/null)
+if [ -n "$_OC_UCI_MP" ] && [ "$_OC_UCI_MP" != "/opt" ]; then
+	NODE_BASE="${_OC_UCI_MP}/openclaw/node"
+	OC_GLOBAL="${_OC_UCI_MP}/openclaw/global"
+	OC_DATA="${_OC_UCI_MP}/openclaw/data"
+fi
+
 # ── OverlayFS 兼容性修复 ──
 # Docker bind mount (/overlay/upper/opt/docker) 会导致 /opt 不可写
 # 解决: bind mount upper 层的 /opt 到合并视图的 /opt
 _oc_fix_opt() {
-	mkdir -p /opt/openclaw/.probe 2>/dev/null && { rmdir /opt/openclaw/.probe 2>/dev/null; return 0; }
-	if [ -d /overlay/upper/opt ]; then
-		mkdir -p /overlay/upper/opt/openclaw 2>/dev/null
-		mount --bind /overlay/upper/opt /opt 2>/dev/null && return 0
+	local _base="${_OC_UCI_MP:-/opt}"
+	mkdir -p "${_base}/openclaw/.probe" 2>/dev/null && { rmdir "${_base}/openclaw/.probe" 2>/dev/null; return 0; }
+	if [ -d "/overlay/upper${_base}" ]; then
+		mkdir -p "/overlay/upper${_base}/openclaw" 2>/dev/null
+		mount --bind "/overlay/upper${_base}" "${_base}" 2>/dev/null && return 0
 	fi
 	return 1
 }
@@ -474,6 +484,10 @@ port=$(uci -q get openclaw.main.port || echo "18789")
 pty_port=$(uci -q get openclaw.main.pty_port || echo "18793")
 
 echo "=== OpenClaw 服务状态 ==="
+
+# 挂载点
+local _mp="${_OC_UCI_MP:-/opt}"
+echo "挂载点:   ${_mp}"
 
 # Node.js
 if [ -x "$NODE_BIN" ]; then
