@@ -9,14 +9,6 @@ NODE_BASE="/opt/openclaw/node"
 OC_GLOBAL="/opt/openclaw/global"
 OC_DATA="/opt/openclaw/data"
 
-# 读取自定义挂载点 (如有)
-_OC_MP=$(uci -q get openclaw.main.mount_point 2>/dev/null)
-if [ -n "$_OC_MP" ] && [ "$_OC_MP" != "/opt" ]; then
-	NODE_BASE="${_OC_MP}/openclaw/node"
-	OC_GLOBAL="${_OC_MP}/openclaw/global"
-	OC_DATA="${_OC_MP}/openclaw/data"
-fi
-
 # 检查 Node.js 是否已安装
 [ -x "${NODE_BASE}/bin/node" ] || return 0
 
