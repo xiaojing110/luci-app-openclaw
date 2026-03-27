@@ -321,8 +321,23 @@ install_openclaw() {
 	# 检查 git 是否可用 (openclaw 部分依赖可能使用 git:// 协议)
 	if ! command -v git >/dev/null 2>&1; then
 		log_warn "未检测到 git，正在尝试安装..."
-		opkg update >/dev/null 2>&1
-		opkg install git git-http 2>&1 | tail -3 || true
+		local _git_installed=0
+		if command -v opkg >/dev/null 2>&1; then
+			# opkg update 有时会因镜像问题卡住，加超时保护
+			timeout 30 opkg update >/dev/null 2>&1 || true
+			# 先尝试安装 git (忽略 opkg 错误，避免触发 set -e)
+			if timeout 60 opkg install --force-depends git git-http >/dev/null 2>&1; then
+				_git_installed=1
+			fi
+			# 如果 git 安装失败，尝试仅安装 git（不带 git-http）
+			if [ "$_git_installed" -eq 0 ]; then
+				timeout 60 opkg install --force-depends git >/dev/null 2>&1 && _git_installed=1 || true
+			fi
+			# 最后尝试用 npm 安装 git (不依赖 opkg)
+			if [ "$_git_installed" -eq 0 ] && [ -x "$NPM_BIN" ]; then
+				"$NPM_BIN" install -g git >/dev/null 2>&1 && _git_installed=1 || true
+			fi
+		fi
 		if command -v git >/dev/null 2>&1; then
 			log_info "git 安装成功"
 		else
