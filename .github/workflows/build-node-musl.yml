@@ -4,18 +4,18 @@ on:
   workflow_dispatch:
     inputs:
       build_v1:
-        description: 'Build V1 (22.16.0) - Legacy compatibility'
+        description: 'Build V1 (22.15.1) - Legacy compatibility'
         required: false
         default: true
         type: boolean
       build_v2:
-        description: 'Build V2 (24.14.1) - Current version'
+        description: 'Build V2 (22.16.0) - Current version'
         required: false
         default: true
         type: boolean
 
 jobs:
-  # ── V1 构建: 使用 Alpine apk 模式 (22.16.0) ──
+  # ── V1 构建: 使用 Alpine apk 模式 (22.15.1) ──
   build-v1:
     name: Build Node.js V1 (Legacy)
     if: ${{ inputs.build_v1 }}
@@ -36,7 +36,7 @@ jobs:
 
       - name: Build Node.js V1 ARM64 musl (apk lts mode)
         run: |
-          NODE_VER="22.16.0"
+          NODE_VER="22.15.1"
           mkdir -p dist
           echo "=== Building Node.js v${NODE_VER} ARM64 musl (apk lts mode) ==="
           docker run --rm --platform linux/arm64 \
@@ -87,9 +87,9 @@ jobs:
         with:
           platforms: linux/arm64
 
-      - name: Build Node.js V2 ARM64 musl (apk lts mode)
+      - name: Build Node.js V2 ARM64 musl (apk current mode)
         run: |
-          NODE_VER="24.14.1"
+          NODE_VER="22.16.0"
           mkdir -p dist
           echo "=== Building Node.js v${NODE_VER} ARM64 musl (apk lts mode) ==="
           docker run --rm --platform linux/arm64 \
@@ -97,7 +97,7 @@ jobs:
             -v "$PWD/scripts/build-node-musl.sh:/build-node-musl.sh:ro" \
             -e "NODE_VER=${NODE_VER}" \
             -e "BUILD_MODE=apk" \
-            -e "PKG_TYPE=lts" \
+            -e "PKG_TYPE=current" \
             alpine:3.21 sh /build-node-musl.sh
 
       - name: Build info
@@ -169,13 +169,13 @@ jobs:
 
             | 文件 | 版本 | 用途 |
             |------|------|------|
-            | `node-v24.x.x-linux-arm64-musl.tar.xz` | V2 (当前) | OpenClaw v2026.3.11+ (要求 >= 24.0.0) |
+            | `node-v23.x.x-linux-arm64-musl.tar.xz` | V2 (当前) | OpenClaw v2026.3.11+ (要求 >= 22.16.0)
             | `node-v22.x.x-linux-arm64-musl.tar.xz` | V1 (旧版) | OpenClaw v2026.3.8 及更早版本 |
 
             ## 构建模式
 
             两种版本均使用 **Alpine apk 模式** 构建:
-            - **V2**: 使用 Alpine `nodejs` LTS 包 (v24.x)，满足 OpenClaw >= 24.0.0 的要求
+            - **V2**: 使用 Alpine `nodejs-current` 包 (v23.x)，满足 OpenClaw >= 22.16.0 的要求
             - **V1**: 使用 Alpine `nodejs` LTS 包 (v22.x)，兼容旧版 OpenClaw
 
             `openclaw-env setup` 会在 ARM64 musl 设备上自动从此处下载合适的版本。
