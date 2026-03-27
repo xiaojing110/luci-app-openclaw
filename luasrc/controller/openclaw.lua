@@ -89,18 +89,6 @@ function action_status()
 	-- 检查 Node.js
 	local node_bin = "/opt/openclaw/node/bin/node"
 	local f = io.open(node_bin, "r")
-	if not f then
-		-- 尝试自定义挂载点
-		local mp = uci:get("openclaw", "main", "mount_point") or ""
-		if mp ~= "" and mp ~= "/opt" then
-			local alt_bin = mp .. "/openclaw/node/bin/node"
-			local f2 = io.open(alt_bin, "r")
-			if f2 then f2:close(); node_bin = alt_bin end
-		end
-	else
-		f:close()
-	end
-	local f = io.open(node_bin, "r")
 	if f then
 		f:close()
 		local node_ver = sys.exec(node_bin .. " --version 2>/dev/null"):gsub("%s+", "")
@@ -108,13 +96,10 @@ function action_status()
 	end
 
 	-- OpenClaw 版本 (从 package.json 读取)
-	local oc_base = "/opt/openclaw"
-	local mp2 = uci:get("openclaw", "main", "mount_point") or ""
-	if mp2 ~= "" and mp2 ~= "/opt" then oc_base = mp2 .. "/openclaw" end
 	local oc_dirs = {
-		oc_base .. "/global/lib/node_modules/openclaw",
-		oc_base .. "/global/node_modules/openclaw",
-		oc_base .. "/node/lib/node_modules/openclaw",
+		"/opt/openclaw/global/lib/node_modules/openclaw",
+		"/opt/openclaw/global/node_modules/openclaw",
+		"/opt/openclaw/node/lib/node_modules/openclaw",
 	}
 	for _, d in ipairs(oc_dirs) do
 		local pf = io.open(d .. "/package.json", "r")
@@ -147,7 +132,7 @@ function action_status()
 	result.pty_running = (tonumber(pty_check) or 0) > 0
 
 	-- 读取当前活跃模型
-	local config_file = oc_base .. "/data/.openclaw/openclaw.json"
+	local config_file = "/opt/openclaw/data/.openclaw/openclaw.json"
 	local cf = io.open(config_file, "r")
 	if cf then
 		local content = cf:read("*a")
@@ -253,16 +238,6 @@ function action_service_ctl()
 				env_prefix = "OC_VERSION=" .. version .. " "
 			end
 		end
-
-		-- 自定义挂载点
-		local mount_point = http.formvalue("mount_point") or ""
-		if mount_point ~= "" and mount_point:match("^/") then
-			mount_point = mount_point:gsub("/+$", "") -- 去除尾部斜杠
-			-- 保存到 UCI
-			sys.exec("uci set openclaw.main.mount_point='" .. mount_point .. "'; uci commit openclaw 2>/dev/null")
-			env_prefix = env_prefix .. "OC_BASE=" .. mount_point .. " "
-		end
-
 		-- 后台安装，成功后自动启用并启动服务
 		-- 注: openclaw-env 脚本有 set -e，init_openclaw 中的非关键失败不应阻止启动
 		sys.exec("( " .. env_prefix .. "/usr/bin/openclaw-env setup > /tmp/openclaw-setup.log 2>&1; RC=$?; echo $RC > /tmp/openclaw-setup.exit; if [ $RC -eq 0 ]; then uci set openclaw.main.enabled=1; uci commit openclaw; /etc/init.d/openclaw enable 2>/dev/null; sleep 1; /etc/init.d/openclaw start >> /tmp/openclaw-setup.log 2>&1; fi ) & echo $! > /tmp/openclaw-setup.pid")
@@ -394,11 +369,6 @@ function action_uninstall()
 	local http = require "luci.http"
 	local sys = require "luci.sys"
 
-	-- 读取实际挂载点
-	local mount_point = sys.exec("uci -q get openclaw.main.mount_point 2>/dev/null"):gsub("%s+", "")
-	if mount_point == "" then mount_point = "/opt" end
-	local oc_base = mount_point .. "/openclaw"
-
 	-- 停止服务
 	sys.exec("/etc/init.d/openclaw stop >/dev/null 2>&1")
 	-- 禁用开机启动
@@ -406,11 +376,7 @@ function action_uninstall()
 	-- 设置 UCI enabled=0
 	sys.exec("uci set openclaw.main.enabled=0; uci commit openclaw 2>/dev/null")
 	-- 删除 Node.js + OpenClaw 运行环境 (包含所有插件: qqbot, 飞书等)
-	sys.exec("rm -rf " .. oc_base)
-	-- 如果挂载点非默认，也重置 UCI
-	if mount_point ~= "/opt" then
-		sys.exec("uci set openclaw.main.mount_point='/opt'; uci commit openclaw 2>/dev/null")
-	end
+	sys.exec("rm -rf /opt/openclaw")
 	-- 清理旧数据迁移后可能残留的目录
 	sys.exec("rm -rf /root/.openclaw 2>/dev/null")
 	-- 清理临时文件
@@ -423,7 +389,7 @@ function action_uninstall()
 	http.prepare_content("application/json")
 	http.write_json({
 		status = "ok",
-		message = "运行环境已卸载。已清理: " .. oc_base .. " (" .. mount_point .. ")、所有插件 (qqbot/飞书等)、旧数据目录、临时文件、LuCI 缓存。"
+		message = "运行环境已卸载。已清理: Node.js 运行环境 (/opt/openclaw)、所有插件 (qqbot/飞书等)、旧数据目录 (/root/.openclaw)、临时文件、LuCI 缓存。"
 	})
 end
 
@@ -580,16 +546,14 @@ function action_backup()
 	local sys = require "luci.sys"
 	local action = http.formvalue("action") or "create"
 
-	-- 读取实际挂载点
-	local mount_point = sys.exec("uci -q get openclaw.main.mount_point 2>/dev/null"):gsub("%s+", "")
-	if mount_point == "" then mount_point = "/opt" end
-	local oc_base = mount_point .. "/openclaw"
-	local node_bin = oc_base .. "/node/bin/node"
+	local node_bin = "/opt/openclaw/node/bin/node"
 	local oc_entry = ""
+
+	-- 查找 openclaw 入口
 	local search_dirs = {
-		oc_base .. "/global/lib/node_modules/openclaw",
-		oc_base .. "/global/node_modules/openclaw",
-		oc_base .. "/node/lib/node_modules/openclaw",
+		"/opt/openclaw/global/lib/node_modules/openclaw",
+		"/opt/openclaw/global/node_modules/openclaw",
+		"/opt/openclaw/node/lib/node_modules/openclaw",
 	}
 	for _, d in ipairs(search_dirs) do
 		if nixio.fs.stat(d .. "/openclaw.mjs", "type") then
@@ -607,17 +571,15 @@ function action_backup()
 		return
 	end
 
-	local oc_data = oc_base .. "/data"
 	local env_prefix = string.format(
-		"HOME=%s OPENCLAW_HOME=%s " ..
-		"OPENCLAW_STATE_DIR=%s/.openclaw " ..
-		"OPENCLAW_CONFIG_PATH=%s/.openclaw/openclaw.json " ..
-		"PATH=%s/node/bin:%s/global/bin:$PATH ",
-		oc_data, oc_data, oc_data, oc_data, oc_base, oc_base
+		"HOME=/opt/openclaw/data OPENCLAW_HOME=/opt/openclaw/data " ..
+		"OPENCLAW_STATE_DIR=/opt/openclaw/data/.openclaw " ..
+		"OPENCLAW_CONFIG_PATH=/opt/openclaw/data/.openclaw/openclaw.json " ..
+		"PATH=/opt/openclaw/node/bin:/opt/openclaw/global/bin:$PATH "
 	)
 
 	-- 备份目录 (openclaw backup create 输出到 CWD，需要 cd)
-	local backup_dir = oc_data .. "/.openclaw/backups"
+	local backup_dir = "/opt/openclaw/data/.openclaw/backups"
 	local cd_prefix = "mkdir -p " .. backup_dir .. " && cd " .. backup_dir .. " && "
 
 	-- ── 辅助: 解析单个备份文件的 manifest 信息 ──
@@ -684,7 +646,7 @@ function action_backup()
 		end
 		local output = sys.exec(backup_cmd)
 		-- 完整备份可能输出到 HOME，移动到 backup_dir
-		sys.exec("mv " .. oc_data .. "/*-openclaw-backup.tar.gz " .. backup_dir .. "/ 2>/dev/null")
+		sys.exec("mv /opt/openclaw/data/*-openclaw-backup.tar.gz " .. backup_dir .. "/ 2>/dev/null")
 		-- 提取备份文件路径
 		local backup_path = output:match("([%S]+%.tar%.gz)")
 		http.prepare_content("application/json")
@@ -730,7 +692,7 @@ function action_backup()
 			http.write_json({ status = "error", message = "未找到备份文件，请先创建备份" })
 			return
 		end
-		local oc_data_dir = oc_data .. "/.openclaw"
+		local oc_data_dir = "/opt/openclaw/data/.openclaw"
 		local config_path = oc_data_dir .. "/openclaw.json"
 
 		-- 1) 先验证备份中的 openclaw.json 是否有效
@@ -858,25 +820,12 @@ function action_check_system()
 	local MIN_MEMORY_MB = 1024      -- 1GB
 	local MIN_DISK_MB = 1536        -- 1.5GB
 
-	-- 读取自定义挂载点
-	local mount_point = http.formvalue("mount_point") or ""
-	-- 安全: 只允许绝对路径
-	if mount_point ~= "" and not mount_point:match("^/") then
-		mount_point = ""
-	end
-	-- 去除尾部斜杠
-	mount_point = mount_point:gsub("/+$", "")
-	if mount_point == "" then
-		mount_point = "/opt"
-	end
-
 	local result = {
 		memory_mb = 0,
 		memory_ok = false,
 		disk_mb = 0,
 		disk_ok = false,
 		disk_path = "",
-		mount_point = mount_point,
 		pass = false,
 		message = ""
 	}
@@ -896,18 +845,14 @@ function action_check_system()
 	result.memory_ok = result.memory_mb >= MIN_MEMORY_MB
 
 	-- 检测磁盘可用空间
-	-- 优先检测用户指定的挂载点，然后 /opt, /overlay, /
-	local disk_paths = {mount_point, "/opt", "/overlay", "/"}
-	local seen_paths = {}
+	-- 优先检测 /opt 所在分区，如果 /opt 不存在则检测 /overlay 或 /
+	local disk_paths = {"/opt", "/overlay", "/"}
 	for _, path in ipairs(disk_paths) do
-		if not seen_paths[path] then
-			seen_paths[path] = true
-			local df_output = sys.exec("df -m " .. path .. " 2>/dev/null | tail -1 | awk '{print $4}'"):gsub("%s+", "")
-			if df_output and df_output ~= "" and tonumber(df_output) then
-				result.disk_mb = tonumber(df_output)
-				result.disk_path = path
-				break
-			end
+		local df_output = sys.exec("df -m " .. path .. " 2>/dev/null | tail -1 | awk '{print $4}'"):gsub("%s+", "")
+		if df_output and df_output ~= "" and tonumber(df_output) then
+			result.disk_mb = tonumber(df_output)
+			result.disk_path = path
+			break
 		end
 	end
 	result.disk_ok = result.disk_mb >= MIN_DISK_MB
