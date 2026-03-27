@@ -44,9 +44,40 @@ act.cfgvalue = function(self, section)
 
 	-- 版本选择对话框 (默认隐藏)
 	html[#html+1] = '<div id="oc-setup-dialog" style="display:none;position:fixed;top:0;left:0;right:0;bottom:0;background:rgba(0,0,0,0.5);z-index:10000;align-items:center;justify-content:center;">'
-	html[#html+1] = '<div style="background:#fff;border-radius:12px;padding:24px 28px;max-width:480px;width:90%;box-shadow:0 8px 32px rgba(0,0,0,0.2);">'
-	html[#html+1] = '<h3 style="margin:0 0 16px 0;font-size:16px;color:#333;">📦 选择安装版本</h3>'
+	html[#html+1] = '<div style="background:#fff;border-radius:12px;padding:24px 28px;max-width:520px;width:90%;box-shadow:0 8px 32px rgba(0,0,0,0.2);max-height:90vh;overflow-y:auto;">'
+	html[#html+1] = '<h3 style="margin:0 0 16px 0;font-size:16px;color:#333;">📦 安装运行环境</h3>'
 	html[#html+1] = '<div style="display:flex;flex-direction:column;gap:12px;">'
+	-- 自定义挂载点
+	html[#html+1] = '<div style="padding:12px 14px;border:1px solid #e0e0e0;border-radius:8px;background:#fafbfc;">'
+	html[#html+1] = '<label style="display:block;font-size:13px;font-weight:600;color:#333;margin-bottom:6px;">💾 磁盘挂载点</label>'
+	html[#html+1] = '<div style="font-size:12px;color:#888;margin-bottom:8px;">安装目录和数据将存放在此路径下的 openclaw/ 目录中</div>'
+	html[#html+1] = '<div style="display:flex;gap:8px;align-items:center;flex-wrap:wrap;">'
+	-- 常用挂载点快捷按钮 (动态检测)
+	local mount_candidates = {}
+	-- 检测系统上的可用挂载点
+	local df_lines = luci.sys.exec("df -h 2>/dev/null | awk 'NR>1 && $6!=\"/\" && $6!=\"/boot\" && $6!=\"/tmp\" && $6~/^\\//{print $6\":\"$4\" 可用\"}' | sort -u 2>/dev/null"):gsub("%s+$", "")
+	local has_custom_mount = false
+	for line in df_lines:gmatch("[^\n]+") do
+		local mp, info = line:match("^([^:]+):(.+)$")
+		if mp and mp ~= "/opt" then
+			has_custom_mount = true
+			mount_candidates[#mount_candidates+1] = {mp, info}
+		end
+	end
+	-- 默认 /opt
+	html[#html+1] = '<button class="btn cbi-button cbi-button-action" type="button" onclick="ocSetMount(this,\x27/opt\x27)" style="font-size:11px;padding:3px 10px;" id="mp-btn-opt">/opt <span style="color:#888">(默认)</span></button>'
+	-- 动态检测到的挂载点
+	for _, mc in ipairs(mount_candidates) do
+		if #mount_candidates <= 6 then
+			html[#html+1] = '<button class="btn cbi-button" type="button" onclick="ocSetMount(this,\x27' .. mc[1] .. '\x27)" style="font-size:11px;padding:3px 10px;">' .. mc[1] .. ' <span style="color:#888">(' .. mc[2] .. ')</span></button>'
+		end
+	end
+	html[#html+1] = '</div>'
+	html[#html+1] = '<div style="display:flex;align-items:center;gap:8px;margin-top:8px;">'
+	html[#html+1] = '<input type="text" id="oc-mount-point" value="/opt" style="flex:1;padding:6px 10px;border:1px solid #d0d7de;border-radius:6px;font-size:13px;" placeholder="例如: /mnt/sda1 或 /tmp/usb">'
+	html[#html+1] = '</div>'
+	html[#html+1] = '<div id="oc-mount-info" style="font-size:11px;color:#888;margin-top:4px;"></div>'
+	html[#html+1] = '</div>'
 	-- 稳定版选项
 	html[#html+1] = '<label style="display:flex;align-items:flex-start;gap:10px;padding:14px 16px;border:2px solid #4a90d9;border-radius:8px;cursor:pointer;background:#f0f7ff;" id="oc-opt-stable">'
 	html[#html+1] = '<input type="radio" name="oc-ver-choice" value="stable" checked style="margin-top:2px;">'
@@ -87,14 +118,45 @@ act.cfgvalue = function(self, section)
 	html[#html+1] = 'dlg.style.display="flex";'
 	html[#html+1] = 'var radios=document.getElementsByName("oc-ver-choice");'
 	html[#html+1] = 'for(var i=0;i<radios.length;i++){if(radios[i].value==="stable")radios[i].checked=true;}'
+	html[#html+1] = 'var mpInput=document.getElementById("oc-mount-point");'
+	html[#html+1] = 'if(mpInput){ocCheckMount();mpInput.addEventListener("input",function(){ocCheckMount();});}'
 	html[#html+1] = '}'
 	html[#html+1] = 'function ocCloseSetupDialog(){'
 	html[#html+1] = 'document.getElementById("oc-setup-dialog").style.display="none";'
 	html[#html+1] = '}'
+	-- 快捷设置挂载点
+	html[#html+1] = 'function ocSetMount(btn,path){'
+	html[#html+1] = 'var inp=document.getElementById("oc-mount-point");'
+	html[#html+1] = 'if(inp){inp.value=path;ocCheckMount();}'
+	html[#html+1] = 'var wrap=btn.parentNode;var btns=wrap.querySelectorAll("button");for(var i=0;i<btns.length;i++){btns[i].style.borderColor="#d0d7de";btns[i].style.background="#fff";}'
+	html[#html+1] = 'btn.style.borderColor="#4a90d9";btn.style.background="#f0f7ff";'
+	html[#html+1] = '}'
+	-- 检测挂载点可用空间
+	html[#html+1] = 'function ocCheckMount(){'
+	html[#html+1] = 'var inp=document.getElementById("oc-mount-point");'
+	html[#html+1] = 'var info=document.getElementById("oc-mount-info");'
+	html[#html+1] = 'if(!inp||!info)return;'
+	html[#html+1] = 'var path=inp.value.replace(/\\s+/g,"");'
+	html[#html+1] = 'if(!path){info.innerHTML="<span style=\\"color:#cf222e;\\">请输入挂载点路径</span>";return;}'
+	html[#html+1] = 'info.innerHTML="<span style=\\"color:#7aa2f7;\\">⏳ 检测中...</span>";'
+	html[#html+1] = '(new XHR()).get("' .. check_system_url .. '&mount_point="+encodeURIComponent(path),null,function(x){'
+	html[#html+1] = 'try{'
+	html[#html+1] = 'var r=JSON.parse(x.responseText);'
+	html[#html+1] = 'var ok=r.disk_ok;'
+	html[#html+1] = 'var color=ok?"#1a7f37":"#cf222e";'
+	html[#html+1] = 'var icon=ok?"✅":"❌";'
+	html[#html+1] = 'var msg=icon+" 路径: "+r.disk_path+"，可用: "+r.disk_mb+" MB (需要 ≥ 1536 MB)";'
+	html[#html+1] = 'info.innerHTML="<span style=\\"color:"+color+";\\">"+msg+"</span>";'
+	html[#html+1] = '}catch(e){info.innerHTML="<span style=\\"color:#888;\\">检测完成</span>";}'
+	html[#html+1] = '});'
+	html[#html+1] = '}'
 	html[#html+1] = 'function ocConfirmSetup(){'
+	html[#html+1] = 'var mountPoint=(document.getElementById("oc-mount-point")||{}).value||"/opt";'
+	html[#html+1] = 'mountPoint=mountPoint.replace(/\\s+/g,"");'
+	html[#html+1] = 'if(!mountPoint){alert("请输入挂载点路径");return;}'
 	html[#html+1] = 'var btn=document.getElementById("btn-setup");'
 	html[#html+1] = 'btn.disabled=true;btn.textContent="⏳ 检测系统配置...";'
-	html[#html+1] = '(new XHR()).get("' .. check_system_url .. '",null,function(x){'
+	html[#html+1] = '(new XHR()).get("' .. check_system_url .. '?mount_point="+encodeURIComponent(mountPoint) .. '",null,function(x){'
 	html[#html+1] = 'try{'
 	html[#html+1] = 'var r=JSON.parse(x.responseText);'
 	html[#html+1] = 'var panel=document.getElementById("setup-log-panel");'
@@ -112,6 +174,8 @@ act.cfgvalue = function(self, section)
 	html[#html+1] = 'logEl.textContent+="🔍 系统配置检测\\n";'
 	html[#html+1] = 'logEl.textContent+="════════════════════════════════════════\\n";'
 	html[#html+1] = 'logEl.textContent+="内存: "+r.memory_mb+" MB (需要 ≥ 1024 MB) — "+(r.memory_ok?"✅ 通过":"❌ 不达标")+"\\n";'
+	html[#html+1] = 'var mpTxt=r.mount_point?r.mount_point:"/opt";'
+	html[#html+1] = 'logEl.textContent+="挂载点: "+mpTxt+"\\n";'
 	html[#html+1] = 'logEl.textContent+="磁盘: "+r.disk_mb+" MB 可用 (需要 ≥ 1536 MB) — "+(r.disk_ok?"✅ 通过":"❌ 不达标")+"\\n";'
 	html[#html+1] = 'logEl.textContent+="\\n";'
 	html[#html+1] = 'if(!r.pass){'
@@ -145,12 +209,14 @@ act.cfgvalue = function(self, section)
 	html[#html+1] = 'function ocSetup(version,mem_mb,disk_mb){'
 	html[#html+1] = 'var btn=document.getElementById("btn-setup");'
 	html[#html+1] = 'var logEl=document.getElementById("setup-log-content");'
+	html[#html+1] = 'var mountPoint=(document.getElementById("oc-mount-point")||{}).value||"/opt";'
 	html[#html+1] = 'btn.disabled=true;btn.textContent="⏳ 安装中...";'
 	html[#html+1] = 'logEl.textContent+="════════════════════════════════════════\\n";'
 	html[#html+1] = 'logEl.textContent+="📦 安装运行环境 ("+((version==="stable")?"稳定版":"最新版")+")\\n";'
+	html[#html+1] = 'if(mountPoint!=="/opt")logEl.textContent+="💾 挂载点: "+mountPoint+" (自定义)\\n";'
 	html[#html+1] = 'logEl.textContent+="════════════════════════════════════════\\n";'
 	html[#html+1] = 'logEl.textContent+="正在启动安装...\\n";'
-	html[#html+1] = '(new XHR()).get("' .. ctl_url .. '?action=setup&version="+encodeURIComponent(version),null,function(x){'
+	html[#html+1] = '(new XHR()).get("' .. ctl_url .. '?action=setup&version="+encodeURIComponent(version)+\'&mount_point=\'+encodeURIComponent(mountPoint),null,function(x){'
 	html[#html+1] = 'try{JSON.parse(x.responseText);}catch(e){}'
 	html[#html+1] = 'ocPollSetupLog();'
 	html[#html+1] = '});'
@@ -384,7 +450,9 @@ act.cfgvalue = function(self, section)
 
 	-- 卸载运行环境
 	html[#html+1] = 'function ocUninstall(){'
-	html[#html+1] = 'if(!confirm("确定要卸载 OpenClaw 运行环境？\\n\\n将删除 Node.js、OpenClaw 程序及配置数据（/opt/openclaw 目录），服务将停止运行。\\n\\n插件本身不会被删除，之后可重新安装运行环境。"))return;'
+	html[#html+1] = 'var mp="' .. (luci.sys.exec("uci -q get openclaw.main.mount_point 2>/dev/null"):gsub("%s+", "") or "/opt") .. '";'
+	html[#html+1] = 'if(mp==="")mp="/opt";var ocPath=mp+"/openclaw";'
+	html[#html+1] = 'if(!confirm("确定要卸载 OpenClaw 运行环境？\\n\\n将删除 Node.js、OpenClaw 程序及配置数据（"+ocPath+"），服务将停止运行。\\n\\n插件本身不会被删除，之后可重新安装运行环境。"))return;'
 	html[#html+1] = 'var btn=document.getElementById("btn-uninstall");'
 	html[#html+1] = 'var el=document.getElementById("action-result");'
 	html[#html+1] = 'btn.disabled=true;btn.textContent="⏳ 正在卸载...";'
