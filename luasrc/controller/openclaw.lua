@@ -1140,12 +1140,16 @@ function action_wechat_install()
 	local node_bin = install_path .. "/node/bin/node"
 	local npx_bin = install_path .. "/node/bin/npx"
 	local oc_data = install_path .. "/data"
+<<<<<<< HEAD
 	local node_base = install_path .. "/node"
 	local oc_global = install_path .. "/global"
+=======
+>>>>>>> 9828f51e0aee2202aa0c94be1188512436ea0d4d
 
 	-- 清理旧日志和状态
 	sys.exec("rm -f /tmp/openclaw-wechat-install.log /tmp/openclaw-wechat-install.pid /tmp/openclaw-wechat-install.exit")
 
+<<<<<<< HEAD
 	-- 后台执行安装 (修复: 设置 NODE_ICU_DATA 解决 ICU 初始化问题)
 	local install_cmd = string.format(
 		"( " ..
@@ -1167,6 +1171,23 @@ function action_wechat_install()
 		node_base, node_base, oc_global, npx_bin
 	)
 	sys.exec(install_cmd)
+=======
+        -- 后台执行安装
+        local install_cmd = string.format(
+                "( " ..
+                "echo '开始安装微信插件...' > /tmp/openclaw-wechat-install.log; " ..
+                "echo '安装路径: %s' >> /tmp/openclaw-wechat-install.log; " ..
+                "cd %s && " ..
+                "su -s /bin/sh openclaw -c 'HOME=%s OPENCLAW_HOME=%s OPENCLAW_STATE_DIR=%s/.openclaw " ..
+                "PATH=%s/node/bin:%s/global/bin:$PATH " ..
+                "%s -y @tencent-weixin/openclaw-weixin-cli install' >> /tmp/openclaw-wechat-install.log 2>&1; " ..
+                "RC=$?; echo $RC > /tmp/openclaw-wechat-install.exit; " ..
+                "if [ $RC -eq 0 ]; then echo '✅ 微信插件安装成功！' >> /tmp/openclaw-wechat-install.log; " ..
+                "else echo '❌ 安装失败 (exit: '$RC')' >> /tmp/openclaw-wechat-install.log; fi " ..
+                ") & echo $! > /tmp/openclaw-wechat-install.pid",
+                install_path, oc_data, oc_data, oc_data, oc_data, install_path, install_path, npx_bin
+        )	sys.exec(install_cmd)
+>>>>>>> 9828f51e0aee2202aa0c94be1188512436ea0d4d
 
 	http.prepare_content("application/json")
 	http.write_json({ status = "ok", message = "微信插件安装已在后台启动..." })
@@ -1263,6 +1284,7 @@ function action_wechat_login()
         -- 清理旧状态和可能的残留进程
         sys.exec("kill -9 $(cat /tmp/openclaw-wechat-login.pid 2>/dev/null) 2>/dev/null")
         sys.exec("pkill -f 'channels login --channel openclaw-weixin' 2>/dev/null")
+<<<<<<< HEAD
         sys.exec("rm -f /tmp/openclaw-wechat-qrcode.txt /tmp/openclaw-wechat-login.pid /tmp/openclaw-wechat-login.exit /tmp/openclaw-wechat-restarted")
 	-- 后台启动登录流程，将二维码输出到文件
 	local node_base = install_path .. "/node"
@@ -1282,6 +1304,21 @@ function action_wechat_login()
 		node_base, node_base, oc_global, node_bin, oc_entry
 	)
 	sys.exec(login_cmd)
+=======
+        sys.exec("rm -f /tmp/openclaw-wechat-qrcode.txt /tmp/openclaw-wechat-login.pid /tmp/openclaw-wechat-login.exit /tmp/openclaw-wechat-restarted")	-- 后台启动登录流程，将二维码输出到文件
+        local login_cmd = string.format(
+                "( " ..
+                "echo '正在启动微信登录...' > /tmp/openclaw-wechat-qrcode.txt; " ..
+                "echo '安装路径: %s' >> /tmp/openclaw-wechat-qrcode.txt; " ..
+                "cd %s && " ..
+                "su -s /bin/sh openclaw -c 'HOME=%s OPENCLAW_HOME=%s OPENCLAW_STATE_DIR=%s/.openclaw OPENCLAW_CONFIG_PATH=%s/.openclaw/openclaw.json " ..
+                "PATH=%s/node/bin:%s/global/bin:$PATH " ..
+                "%s %s channels login --channel openclaw-weixin' >> /tmp/openclaw-wechat-qrcode.txt 2>&1; " ..
+                "echo $? > /tmp/openclaw-wechat-login.exit; " ..
+                ") >/dev/null 2>&1 & echo $! > /tmp/openclaw-wechat-login.pid",
+                install_path, oc_data, oc_data, oc_data, oc_data, oc_data, install_path, install_path, node_bin, oc_entry
+        )	sys.exec(login_cmd)
+>>>>>>> 9828f51e0aee2202aa0c94be1188512436ea0d4d
 
 	http.prepare_content("application/json")
 	http.write_json({ status = "ok", message = "微信登录流程已启动" })
@@ -1467,6 +1504,7 @@ function action_wechat_upgrade_plugin()
 	-- 清理旧日志和状态
 	sys.exec("rm -f /tmp/openclaw-wechat-install.log /tmp/openclaw-wechat-install.pid /tmp/openclaw-wechat-install.exit")
 
+<<<<<<< HEAD
 	-- 后台执行升级 (其实就是重新安装最新版)
 	local node_base = install_path .. "/node"
 	local oc_global = install_path .. "/global"
@@ -1487,6 +1525,23 @@ function action_wechat_upgrade_plugin()
 		node_base, node_base, oc_global, npx_bin
 	)
 	sys.exec(upgrade_cmd)
+=======
+        -- 后台执行升级 (其实就是重新安装最新版)
+        local upgrade_cmd = string.format(
+                "( " ..
+                "echo '正在升级微信插件...' > /tmp/openclaw-wechat-install.log; " ..
+                "echo '安装路径: %s' >> /tmp/openclaw-wechat-install.log; " ..
+                "cd %s && " ..
+                "su -s /bin/sh openclaw -c 'HOME=%s OPENCLAW_HOME=%s OPENCLAW_STATE_DIR=%s/.openclaw " ..
+                "PATH=%s/node/bin:%s/global/bin:$PATH " ..
+                "%s -y @tencent-weixin/openclaw-weixin-cli install' >> /tmp/openclaw-wechat-install.log 2>&1; " ..
+                "RC=$?; echo $RC > /tmp/openclaw-wechat-install.exit; " ..
+                "if [ $RC -eq 0 ]; then echo '✅ 微信插件升级成功！' >> /tmp/openclaw-wechat-install.log; " ..
+                "else echo '❌ 升级失败 (exit: '$RC')' >> /tmp/openclaw-wechat-install.log; fi " ..
+                ") & echo $! > /tmp/openclaw-wechat-install.pid",
+                install_path, oc_data, oc_data, oc_data, oc_data, install_path, install_path, npx_bin
+        )	sys.exec(upgrade_cmd)
+>>>>>>> 9828f51e0aee2202aa0c94be1188512436ea0d4d
 
 	http.prepare_content("application/json")
 	http.write_json({ status = "ok", message = "微信插件升级已在后台启动..." })
@@ -1533,6 +1588,7 @@ function action_wechat_logout()
         end
 
         -- 在后台执行 logout
+<<<<<<< HEAD
         local node_base = install_path .. "/node"
         local oc_global = install_path .. "/global"
         local logout_cmd = string.format(
@@ -1542,6 +1598,13 @@ function action_wechat_logout()
                 "%s %s channels logout --channel openclaw-weixin --account \"%s\"'",
                 oc_data, oc_data, oc_data, oc_data, oc_data,
                 node_base, node_base, oc_global, node_bin, oc_entry, account_id
+=======
+        local logout_cmd = string.format(
+                "cd %s && su -s /bin/sh openclaw -c 'HOME=%s OPENCLAW_HOME=%s OPENCLAW_STATE_DIR=%s/.openclaw OPENCLAW_CONFIG_PATH=%s/.openclaw/openclaw.json " ..
+                "PATH=%s/node/bin:%s/global/bin:$PATH " ..
+                "%s %s channels logout --channel openclaw-weixin --account \"%s\"'",
+                oc_data, oc_data, oc_data, oc_data, oc_data, install_path, install_path, node_bin, oc_entry, account_id
+>>>>>>> 9828f51e0aee2202aa0c94be1188512436ea0d4d
         )
 
         sys.exec(logout_cmd .. " >/dev/null 2>&1")
