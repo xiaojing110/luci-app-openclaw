@@ -307,9 +307,13 @@ install_pnpm() {
 # Node.js musl 非官方构建可能缺少 ICU 数据文件 (icudt*.dat)
 # 导致 "Could not initialize ICU" 错误，npm/npx 也会受影响
 # 修复: 检测 ICU 数据是否存在，缺失时安装 full-icu 包
+# 注意: 此函数在 set -e 环境下运行，所有操作都必须容错
 fix_icu_data() {
 	echo ""
 	echo "=== 检查 ICU 数据 ==="
+
+	# 确保 ICU 目录存在 (即使后续修复失败，空目录也不会导致 Node.js 崩溃)
+	mkdir -p "${NODE_BASE}/share/icu" 2>/dev/null || true
 
 	# 如果 NODE_ICU_DATA 目录下已有 icudt*.dat 文件，跳过
 	if ls "${NODE_BASE}/share/icu"/icudt*.dat >/dev/null 2>&1; then
@@ -317,39 +321,27 @@ fix_icu_data() {
 		return 0
 	fi
 
-	# 检查 Node.js 自带的 ICU (可能在其他位置)
-	local node_icu_dir
-	node_icu_dir=$("$NODE_BIN" -e "try{console.log(process.config.variables.icu_endianness||'')}catch(e){}" 2>/dev/null)
-	if [ -n "$node_icu_dir" ] && ls "${NODE_BASE}/share"/*/icudt*.dat >/dev/null 2>&1; then
-		log_info "ICU 数据存在于 Node.js 安装中"
-		return 0
-	fi
-
-	# 尝试检测 Node.js 是否内置 ICU
-	local has_small_icu
-	has_small_icu=$("$NODE_BIN" -e "console.log(typeof Intl !== 'undefined' ? 'yes' : 'no')" 2>/dev/null || echo "no")
-	if [ "$has_small_icu" = "yes" ]; then
-		# Intl 存在但可能缺少 full ICU data，测试格式化
+	# 检查 Node.js 是否自带 ICU (测试 Intl 对象)
+	if [ -x "$NODE_BIN" ]; then
 		local icu_test
 		icu_test=$("$NODE_BIN" -e "try{new Intl.NumberFormat('zh-CN');console.log('ok')}catch(e){console.log('fail')}" 2>/dev/null || echo "fail")
 		if [ "$icu_test" = "ok" ]; then
-			log_info "Node.js ICU 运行正常 (small-icu)"
+			log_info "Node.js ICU 运行正常 (内置)"
 			return 0
 		fi
 	fi
 
-	log_warn "ICU 数据缺失或不完整，正在修复..."
+	log_warn "ICU 数据缺失，正在尝试修复..."
 
 	# 方法1: 安装 full-icu npm 包 (包含完整 ICU 数据)
-	ensure_mkdir "${NODE_BASE}/share/icu"
 	echo "  正在安装 full-icu 数据包..."
-	"$NPM_BIN" install -g full-icu --prefix="$OC_GLOBAL" 2>/dev/null
+	"$NPM_BIN" install -g full-icu --prefix="$OC_GLOBAL" 2>/dev/null || true
 
 	# 查找安装后的 icudt*.dat 文件
 	local icu_data_file
 	icu_data_file=$(find "$OC_GLOBAL" -name "icudt*.dat" 2>/dev/null | head -1)
 	if [ -n "$icu_data_file" ]; then
-		cp "$icu_data_file" "${NODE_BASE}/share/icu/" 2>/dev/null
+		cp "$icu_data_file" "${NODE_BASE}/share/icu/" 2>/dev/null || true
 		log_info "ICU 数据已安装: $(basename "$icu_data_file")"
 		return 0
 	fi
@@ -363,18 +355,17 @@ fix_icu_data() {
 		22) icu_version="76" ;;
 		21) icu_version="74" ;;
 		20) icu_version="73" ;;
-		*)  icu_version="77" ;; # 默认尝试最新
+		*)  icu_version="77" ;;
 	esac
 
 	local icu_file="icudt${icu_version}l.dat"
-	local icu_mirror="https://github.com/nicolo-ribaudo/icu4c-data/releases/download/74.1/icu4c-74_1-data"
+	local icu_downloaded=0
 
 	# 尝试从多个来源下载 ICU 数据
-	local icu_downloaded=0
-	local icu_urls="https://github.com/nicolo-ribaudo/icu4c-data/releases/download/74.1/icudt74l.dat"
-	icu_urls="$icu_urls https://unofficial-builds.nodejs.org/download/release/v${NODE_VERSION}/icu/icudt77l.dat"
-
-	for icu_url in $icu_urls; do
+	for icu_url in \
+		"https://unofficial-builds.nodejs.org/download/release/v${NODE_VERSION}/icu/${icu_file}" \
+		"https://github.com/nicolo-ribaudo/icu4c-data/releases/download/74.1/icudt74l.dat" \
+	; do
 		echo "  尝试下载 ICU 数据: $icu_url"
 		if curl -fSL --connect-timeout 10 --max-time 60 -o "${NODE_BASE}/share/icu/${icu_file}" "$icu_url" 2>/dev/null; then
 			local fsize=$(wc -c < "${NODE_BASE}/share/icu/${icu_file}" 2>/dev/null || echo 0)
@@ -382,7 +373,7 @@ fix_icu_data() {
 				icu_downloaded=1
 				break
 			else
-				rm -f "${NODE_BASE}/share/icu/${icu_file}" 2>/dev/null
+				rm -f "${NODE_BASE}/share/icu/${icu_file}" 2>/dev/null || true
 			fi
 		fi
 	done
@@ -392,9 +383,9 @@ fix_icu_data() {
 		return 0
 	fi
 
-	# 方法3: 尝试使用 Node.js 内置的 small ICU (如果 Intl 可用)
-	log_warn "无法下载完整 ICU 数据，将尝试使用 Node.js 内置 ICU"
-	log_warn "如果仍出现 ICU 错误，请手动下载 icudt*.dat 到 ${NODE_BASE}/share/icu/"
+	# 所有方法都失败，但不阻止后续安装 — Node.js 内置 ICU 通常已足够
+	log_warn "无法获取完整 ICU 数据，将依赖 Node.js 内置 ICU"
+	log_warn "如果后续出现 ICU 错误，请手动安装: npm install -g full-icu"
 	return 0
 }
 
@@ -426,8 +417,9 @@ install_openclaw() {
 	# 检查 git 是否可用 (openclaw 部分依赖可能使用 git:// 协议)
 	if ! command -v git >/dev/null 2>&1; then
 		log_warn "未检测到 git，正在尝试安装..."
-		opkg update >/dev/null 2>&1
-		opkg install git git-http 2>&1 | tail -3 || true
+		# 添加超时防止 opkg 卡死 (某些 OpenWrt 源在国内访问很慢)
+		timeout 60 opkg update >/dev/null 2>&1 || true
+		timeout 120 opkg install git git-http 2>&1 | tail -3 || true
 		if command -v git >/dev/null 2>&1; then
 			log_info "git 安装成功"
 		else
