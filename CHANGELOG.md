@@ -4,7 +4,6 @@
 
 格式基于 [Keep a Changelog](https://keepachangelog.com/zh-CN/1.0.0/)。
 
-<<<<<<< HEAD
 ## [2.0.3] - 2026-04-04
 
 ### Bug 修复
@@ -35,8 +34,6 @@
 - 所有通过 `su -s /bin/sh openclaw -c '...'` 执行的命令现在都会传递 `NODE_ICU_DATA` 环境变量
 - `profile.d/openclaw.sh` 中已有的 `NODE_ICU_DATA` 设置与修复保持一致
 
-=======
->>>>>>> 9828f51e0aee2202aa0c94be1188512436ea0d4d
 ## [2.0.2] - 2026-03-31
 
 ### 新增功能
