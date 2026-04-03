@@ -16,7 +16,35 @@ LUCI_TITLE:=OpenClaw AI 网关 LuCI 管理插件
 LUCI_DEPENDS:=+luci-compat +luci-base +curl +openssl-util +script-utils +tar +libstdcpp6
 LUCI_PKGARCH:=all
 
-# ── 共用: 安装规则 (feeds 模式 & standalone 模式都需要) ──
+# 优先使用 luci.mk (feeds 模式), 不可用时回退 package.mk
+ifeq ($(wildcard $(TOPDIR)/feeds/luci/luci.mk),)
+
+  include $(INCLUDE_DIR)/package.mk
+
+  define Package/$(PKG_NAME)
+    SECTION:=luci
+    CATEGORY:=LuCI
+    SUBMENU:=3. Applications
+    TITLE:=$(LUCI_TITLE)
+    DEPENDS:=$(LUCI_DEPENDS)
+    PKGARCH:=all
+  endef
+
+  define Package/$(PKG_NAME)/description
+    OpenClaw AI Gateway 的 LuCI 管理插件。
+    支持 12+ AI 模型提供商和 Telegram/Discord 等多种消息渠道。
+  endef
+
+else
+
+  include $(TOPDIR)/feeds/luci/luci.mk
+
+endif
+
+define Package/$(PKG_NAME)/conffiles
+/etc/config/openclaw
+endef
+
 define Package/$(PKG_NAME)/install
 	$(INSTALL_DIR) $(1)/etc/config
 	$(INSTALL_CONF) ./root/etc/config/openclaw $(1)/etc/config/openclaw
@@ -48,10 +76,6 @@ define Package/$(PKG_NAME)/install
 	fi
 endef
 
-define Package/$(PKG_NAME)/conffiles
-/etc/config/openclaw
-endef
-
 define Package/$(PKG_NAME)/postinst
 #!/bin/sh
 [ -n "$${IPKG_INSTROOT}" ] || {
@@ -68,28 +92,4 @@ define Package/$(PKG_NAME)/postrm
 }
 endef
 
-# ── 模式选择 ──
-# 优先使用 luci.mk (feeds 模式), 不可用时回退 package.mk
-# 注意: 两种模式二选一, 不可同时注册, 否则 menuconfig 会出现两个条目。
-#       luci.mk 内部会执行 $(eval $(call BuildPackage,...)), standalone 模式需手动 eval。
-ifneq ($(wildcard $(TOPDIR)/feeds/luci/luci.mk),)
-  include $(TOPDIR)/feeds/luci/luci.mk
-else
-  include $(INCLUDE_DIR)/package.mk
-
-  define Package/$(PKG_NAME)
-    SECTION:=luci
-    CATEGORY:=LuCI
-    SUBMENU:=3. Applications
-    TITLE:=$(LUCI_TITLE)
-    DEPENDS:=$(LUCI_DEPENDS)
-    PKGARCH:=all
-  endef
-
-  define Package/$(PKG_NAME)/description
-    OpenClaw AI Gateway 的 LuCI 管理插件。
-    支持 12+ AI 模型提供商和 Telegram/Discord 等多种消息渠道。
-  endef
-
-  $(eval $(call BuildPackage,$(PKG_NAME)))
-endif
+$(eval $(call BuildPackage,$(PKG_NAME)))

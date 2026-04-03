@@ -28,10 +28,14 @@ get_pid_by_port() {
 	fi
 }
 
-# ── 路径 (OpenWrt 适配) ──
-NODE_BASE="${NODE_BASE:-/opt/openclaw/node}"
-OC_GLOBAL="${OC_GLOBAL:-/opt/openclaw/global}"
-OC_DATA="${OC_DATA:-/opt/openclaw/data}"
+# ── 路径 (OpenWrt 适配，支持自定义安装路径) ──
+# 从 UCI 配置读取自定义路径，环境变量可覆盖
+# 用户配置的是基础路径，程序会在此路径下创建 openclaw 目录
+OC_BASE_PATH="${OC_INSTALL_PATH:-$(uci -q get openclaw.main.install_path 2>/dev/null || echo '/opt')}"
+OC_INSTALL_PATH="${OC_BASE_PATH}/openclaw"
+NODE_BASE="${NODE_BASE:-${OC_INSTALL_PATH}/node}"
+OC_GLOBAL="${OC_GLOBAL:-${OC_INSTALL_PATH}/global}"
+OC_DATA="${OC_DATA:-${OC_INSTALL_PATH}/data}"
 NODE_BIN="${NODE_BASE}/bin/node"
 OC_STATE_DIR="${OC_DATA}/.openclaw"
 CONFIG_FILE="${OC_STATE_DIR}/openclaw.json"
@@ -99,7 +103,7 @@ json_set() {
 		local parent_dir="$(dirname "$CONFIG_FILE")"
 		if ! mkdir -p "$parent_dir" 2>/dev/null; then
 			echo "ERROR: 无法创建配置目录 $parent_dir" >&2
-			echo "HINT: 请检查 /opt/openclaw/data 是否存在且有写权限" >&2
+			echo "HINT: 请检查 $OC_DATA 是否存在且有写权限" >&2
 			return 1
 		fi
 		
@@ -574,6 +578,14 @@ show_current_config() {
 	echo -e "${GREEN}├──────────────────────────────────────────────────────────┤${NC}"
 	echo -e "${GREEN}│${NC}  ${BOLD}渠道配置状态${NC}"
 
+	# 检测微信渠道
+	local wechat_ext_dir="${OC_STATE_DIR}/extensions/openclaw-weixin"
+	if [ -d "$wechat_ext_dir" ] && [ -f "${wechat_ext_dir}/openclaw.plugin.json" ]; then
+		echo -e "${GREEN}│${NC}  微信 .............. ${GREEN}✅ 已配置${NC}"
+	else
+		echo -e "${GREEN}│${NC}  微信 .............. ${YELLOW}❌ 未配置${NC}"
+	fi
+
 	local tg_token=$(json_get channels.telegram.botToken)
 	local dc_token=$(json_get channels.discord.botToken)
 	local fs_appid=$(json_get channels.feishu.appId)
@@ -647,7 +659,9 @@ configure_model() {
 	echo -e "  ${CYAN}11)${NC} 硅基流动 SiliconFlow"
 	echo -e "  ${CYAN}12)${NC} Ollama (本地模型，无需 API Key)"
 	echo -e "  ${CYAN}13)${NC} 腾讯云 Coding Plan (HY T1/TurboS/GLM-5/Kimi)"
-	echo -e "  ${CYAN}14)${NC} 自定义 OpenAI 兼容 API"
+	echo -e "  ${CYAN}14)${NC} Mistral AI (Mistral Large, Codestral)"
+	echo -e "  ${CYAN}15)${NC} 百度千帆 (ERNIE-4.0, ERNIE-3.5)"
+	echo -e "  ${CYAN}16)${NC} 自定义 OpenAI 兼容 API"
 	echo -e "  ${CYAN}0)${NC} 返回"
 	echo ""
 	prompt_with_default "请选择" "1" choice
@@ -1078,18 +1092,36 @@ configure_model() {
 			prompt_with_default "请输入 SiliconFlow API Key" "" api_key
 			if [ -n "$api_key" ]; then
 				echo ""
-				echo -e "  ${CYAN}可用模型:${NC}"
-				echo -e "    ${CYAN}a)${NC} deepseek-ai/DeepSeek-V3      — DeepSeek V3 (推荐)"
-				echo -e "    ${CYAN}b)${NC} deepseek-ai/DeepSeek-R1      — DeepSeek R1"
-				echo -e "    ${CYAN}c)${NC} Qwen/Qwen3-235B-A22B        — 通义千问 Qwen3 235B"
-				echo -e "    ${CYAN}d)${NC} 手动输入模型名"
+				echo -e "  ${CYAN}可用模型分类说明:${NC}"
+				echo -e "  ${YELLOW}* Pro模型 (带 Pro/ 前缀): 仅支持充值余额支付，并发与速率(Rate Limits)可变。${NC}"
+				echo -e "  ${YELLOW}* 非Pro模型 (无 Pro/ 前缀): 支持赠费余额（代金券）和充值余额支付，Rate Limits 固定。${NC}"
+				echo -e "  ${GREEN}【建议】如果您是代金券/赠送余额用户，请务必选择【非Pro模型】。${NC}"
 				echo ""
-				prompt_with_default "请选择模型" "a" model_choice
+				echo -e "  ${CYAN}── 非Pro模型 (支持代金券/免费额度) ──${NC}"
+				echo -e "    ${CYAN}1)${NC} deepseek-ai/DeepSeek-V3       — DeepSeek-V3 (推荐)"
+				echo -e "    ${CYAN}2)${NC} deepseek-ai/DeepSeek-R1       — DeepSeek-R1 (推理模型)"
+				echo -e "    ${CYAN}3)${NC} Qwen/Qwen2.5-72B-Instruct     — 通义千问 2.5 72B"
+				echo -e "    ${CYAN}4)${NC} Qwen/Qwen2.5-7B-Instruct      — 通义千问 2.5 7B"
+				echo -e "    ${CYAN}5)${NC} THUDM/glm-4-9b-chat           — 智谱 GLM-4 9B"
+				echo -e "    ${CYAN}6)${NC} 01-ai/Yi-1.5-34B-Chat-16K     — 零一万物 Yi-1.5 34B"
+				echo ""
+				echo -e "  ${CYAN}── Pro模型 (仅支持充值余额) ──${NC}"
+				echo -e "    ${CYAN}7)${NC} Pro/deepseek-ai/DeepSeek-V3   — DeepSeek-V3 (Pro增强侧)"
+				echo -e "    ${CYAN}8)${NC} Pro/zai-org/GLM-5             — 智谱 GLM-5"
+				echo ""
+				echo -e "    ${CYAN}0)${NC} 手动输入其他任意模型名称"
+				echo ""
+				prompt_with_default "请选择模型 [0-8]" "1" model_choice
 				case "$model_choice" in
-					a) model_name="deepseek-ai/DeepSeek-V3" ;;
-					b) model_name="deepseek-ai/DeepSeek-R1" ;;
-					c) model_name="Qwen/Qwen3-235B-A22B" ;;
-					d) prompt_with_default "请输入模型名称" "deepseek-ai/DeepSeek-V3" model_name ;;
+					1) model_name="deepseek-ai/DeepSeek-V3" ;;
+					2) model_name="deepseek-ai/DeepSeek-R1" ;;
+					3) model_name="Qwen/Qwen2.5-72B-Instruct" ;;
+					4) model_name="Qwen/Qwen2.5-7B-Instruct" ;;
+					5) model_name="THUDM/glm-4-9b-chat" ;;
+					6) model_name="01-ai/Yi-1.5-34B-Chat-16K" ;;
+					7) model_name="Pro/deepseek-ai/DeepSeek-V3" ;;
+					8) model_name="Pro/zai-org/GLM-5" ;;
+					0) prompt_with_default "请输入模型详细名称" "deepseek-ai/DeepSeek-V3" model_name ;;
 					*) model_name="deepseek-ai/DeepSeek-V3" ;;
 				esac
 				auth_set_apikey siliconflow "$api_key"
@@ -1264,6 +1296,70 @@ configure_model() {
 			fi
 			;;
 		14)
+			echo ""
+			echo -e "  ${BOLD}Mistral AI 配置${NC}"
+			echo -e "  ${YELLOW}获取 API Key: https://console.mistral.ai/api-keys/${NC}"
+			echo ""
+			prompt_with_default "请输入 Mistral API Key" "" api_key
+			if [ -n "$api_key" ]; then
+				auth_set_apikey mistral "$api_key"
+				echo ""
+				echo -e "  ${CYAN}可用模型:${NC}"
+				echo -e "    ${CYAN}a)${NC} mistral-large-latest   — 旗舰模型，最强性能 (推荐)"
+				echo -e "    ${CYAN}b)${NC} mistral-medium-latest  — 均衡模型"
+				echo -e "    ${CYAN}c)${NC} codestral-latest      — 代码专用，极速补全"
+				echo -e "    ${CYAN}d)${NC} mistral-small-latest   — 轻量快速"
+				echo -e "    ${CYAN}e)${NC} 手动输入模型名"
+				echo ""
+				prompt_with_default "请选择模型" "a" model_choice
+				case "$model_choice" in
+					a) model_name="mistral-large-latest" ;;
+					b) model_name="mistral-medium-latest" ;;
+					c) model_name="codestral-latest" ;;
+					d) model_name="mistral-small-latest" ;;
+					e) prompt_with_default "请输入模型名称" "mistral-large-latest" model_name ;;
+					*) model_name="mistral-large-latest" ;;
+				esac
+				register_custom_provider mistral "https://api.mistral.ai/v1" "$api_key" "$model_name" "$model_name"
+				register_and_set_model "mistral/${model_name}"
+				echo -e "  ${GREEN}✅ Mistral AI 已配置，活跃模型: mistral/${model_name}${NC}"
+			fi
+			;;
+		15)
+			echo ""
+			echo -e "  ${BOLD}百度千帆大模型配置${NC}"
+			echo -e "  ${YELLOW}获取 API Key: https://console.bce.baidu.com/qianfan/ais/console/onlineService${NC}"
+			echo ""
+			echo -e "  ${DIM}提示: 需要 API Key (Access Token) 和可选的 Secret Key${NC}"
+			echo ""
+			prompt_with_default "请输入百度千帆 API Key (Access Token)" "" api_key
+			if [ -n "$api_key" ]; then
+				auth_set_apikey qianfan "$api_key"
+				echo ""
+				echo -e "  ${CYAN}可用模型:${NC}"
+				echo -e "    ${CYAN}a)${NC} ernie-4.0-8k        — 文心一言 4.0 (推荐)"
+				echo -e "    ${CYAN}b)${NC} ernie-3.5-8k        — 文心一言 3.5"
+				echo -e "    ${CYAN}c)${NC} ernie-4.0-turbo-8k  — 文心一言 4.0 Turbo"
+				echo -e "    ${CYAN}d)${NC} ernie-speed-8k      — 文心一言 Speed 极速"
+				echo -e "    ${CYAN}e)${NC} 手动输入模型名"
+				echo ""
+				prompt_with_default "请选择模型" "a" model_choice
+				case "$model_choice" in
+					a) model_name="ernie-4.0-8k" ;;
+					b) model_name="ernie-3.5-8k" ;;
+					c) model_name="ernie-4.0-turbo-8k" ;;
+					d) model_name="ernie-speed-8k" ;;
+					e) prompt_with_default "请输入模型名称" "ernie-4.0-8k" model_name ;;
+					*) model_name="ernie-4.0-8k" ;;
+				esac
+				# 百度千帆使用 OpenAI 兼容接口
+				# 注: OpenClaw v2026.3.28+ 支持 qianfan 原生 provider
+				register_custom_provider qianfan "https://aip.baidubce.com/rpc/2.0/ai_custom/v1/wenxinworkshop" "$api_key" "$model_name" "$model_name"
+				register_and_set_model "qianfan/${model_name}"
+				echo -e "  ${GREEN}✅ 百度千帆已配置，活跃模型: qianfan/${model_name}${NC}"
+			fi
+			;;
+		16)
 			echo ""
 			echo -e "  ${BOLD}自定义 OpenAI 兼容 API${NC}"
 			echo -e "  ${YELLOW}支持任何兼容 OpenAI API 格式的服务商${NC}"
@@ -1840,8 +1936,10 @@ configure_channels() {
 		echo ""
 		echo -e "  ${BOLD}📡 配置消息渠道${NC}"
 		echo ""
-		echo -e "  ${CYAN}1)${NC} QQ 机器人  ${GREEN}(腾讯QQ，推荐国内用户)${NC}"
-		echo -e "  ${CYAN}2)${NC} Telegram  ${GREEN}(最常用，推荐)${NC}"
+		echo -e "  ${CYAN}提示: 微信配置请使用 LuCI 界面「微信配置」菜单${NC}"
+		echo ""
+		echo -e "  ${CYAN}1)${NC} QQ 机器人  ${GREEN}(腾讯QQ)${NC}"
+		echo -e "  ${CYAN}2)${NC} Telegram  ${GREEN}(最常用)${NC}"
 		echo -e "  ${CYAN}3)${NC} Discord"
 		echo -e "  ${CYAN}4)${NC} 飞书 (Feishu)"
 		echo -e "  ${CYAN}5)${NC} Slack"
@@ -2362,7 +2460,7 @@ backup_restore_menu() {
 							# 提取 payload 到根目录 (还原到原始绝对路径)
 							tar -xzf "$latest" --strip-components=3 -C / "${backup_name}/payload/posix/" 2>&1
 							# 修复权限
-							chown -R openclaw:openclaw /opt/openclaw/data/.openclaw 2>/dev/null
+							chown -R openclaw:openclaw "$OC_STATE_DIR" 2>/dev/null
 							echo -e "  ${GREEN}✅ 配置和数据已完整恢复！原配置已保存为 openclaw.json.pre-restore${NC}"
 							echo ""
 							prompt_with_default "是否重启服务使配置生效? (Y/n)" "Y" do_restart

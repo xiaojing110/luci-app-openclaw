@@ -12,25 +12,35 @@
 set -e
 
 # ── Node.js 版本策略 (双版本兼容) ──
-# V2: 当前推荐版本，用于 OpenClaw v2026.3.11+ (要求 >= 22.16.0)
+# V2: 当前推荐版本，用于 OpenClaw v2026.3.22+ (要求 >= 22.14.0，使用 23.2.0 确保兼容)
 # V1: 旧版兼容，用于 OpenClaw v2026.3.8 及更早版本
-NODE_VERSION_V2="22.16.0"
+NODE_VERSION_V2="23.2.0"
 NODE_VERSION_V1="22.15.1"
 # 默认使用 V2 版本 (可通过 NODE_VERSION 环境变量覆盖)
 NODE_VERSION="${NODE_VERSION:-${NODE_VERSION_V2}}"
 # 经过验证的 OpenClaw 稳定版本 (更新此值需同步测试)
-OC_TESTED_VERSION="2026.3.13"
+OC_TESTED_VERSION="2026.3.28"
 # 用户可通过 OC_VERSION 环境变量覆盖安装版本
 OC_VERSION="${OC_VERSION:-}"
-NODE_BASE="/opt/openclaw/node"
-OC_GLOBAL="/opt/openclaw/global"
-OC_DATA="/opt/openclaw/data"
+
+# ── 安装路径 (支持自定义) ──
+# 从 UCI 配置读取自定义路径，默认为 /opt
+# 用户可在 LuCI 界面或通过 uci set openclaw.main.install_path=/mnt/data 设置
+# 程序会在此路径下自动创建 openclaw 目录
+OC_BASE_PATH="${OC_INSTALL_PATH:-$(uci -q get openclaw.main.install_path || echo '/opt')}"
+OC_INSTALL_PATH="${OC_BASE_PATH}/openclaw"
+NODE_BASE="${OC_INSTALL_PATH}/node"
+OC_GLOBAL="${OC_INSTALL_PATH}/global"
+OC_DATA="${OC_INSTALL_PATH}/data"
 
 # ── OverlayFS 兼容性修复 ──
 # iStoreOS/OpenWrt 上 Docker 的 bind mount (/overlay/upper/opt/docker)
 # 会导致 OverlayFS 合并视图中 /opt 完全不可写 (mkdir 报 "Directory not empty")。
 # 解决方案: 将 /overlay/upper/opt bind mount 到 /opt，绕过 OverlayFS 冲突。
+# 注意: 仅当基础路径为 /opt 时才需要此修复
 _oc_fix_opt() {
+	# 如果基础路径不是 /opt，无需修复
+	[ "$OC_BASE_PATH" != "/opt" ] && return 0
 	# 如果 /opt 可正常写入，无需修复
 	if mkdir -p /opt/openclaw/.probe 2>/dev/null; then
 		rmdir /opt/openclaw/.probe 2>/dev/null
@@ -97,7 +107,7 @@ find_oc_entry() {
 ${OC_GLOBAL}/node_modules/openclaw
 ${NODE_BASE}/lib/node_modules/openclaw"
 
-	# 添加 pnpm 版本化目录 (如 /opt/openclaw/global/5/node_modules/openclaw)
+	# 添加 pnpm 版本化目录 (如 $OC_GLOBAL/5/node_modules/openclaw)
 	for ver_dir in "${OC_GLOBAL}"/*/node_modules/openclaw; do
 		[ -d "$ver_dir" ] 2>/dev/null && search_dirs="$search_dirs
 $ver_dir"
@@ -293,6 +303,101 @@ install_pnpm() {
 	fi
 }
 
+# ── ICU 数据修复 ──
+# Node.js musl 非官方构建可能缺少 ICU 数据文件 (icudt*.dat)
+# 导致 "Could not initialize ICU" 错误，npm/npx 也会受影响
+# 修复: 检测 ICU 数据是否存在，缺失时安装 full-icu 包
+fix_icu_data() {
+	echo ""
+	echo "=== 检查 ICU 数据 ==="
+
+	# 如果 NODE_ICU_DATA 目录下已有 icudt*.dat 文件，跳过
+	if ls "${NODE_BASE}/share/icu"/icudt*.dat >/dev/null 2>&1; then
+		log_info "ICU 数据已存在"
+		return 0
+	fi
+
+	# 检查 Node.js 自带的 ICU (可能在其他位置)
+	local node_icu_dir
+	node_icu_dir=$("$NODE_BIN" -e "try{console.log(process.config.variables.icu_endianness||'')}catch(e){}" 2>/dev/null)
+	if [ -n "$node_icu_dir" ] && ls "${NODE_BASE}/share"/*/icudt*.dat >/dev/null 2>&1; then
+		log_info "ICU 数据存在于 Node.js 安装中"
+		return 0
+	fi
+
+	# 尝试检测 Node.js 是否内置 ICU
+	local has_small_icu
+	has_small_icu=$("$NODE_BIN" -e "console.log(typeof Intl !== 'undefined' ? 'yes' : 'no')" 2>/dev/null || echo "no")
+	if [ "$has_small_icu" = "yes" ]; then
+		# Intl 存在但可能缺少 full ICU data，测试格式化
+		local icu_test
+		icu_test=$("$NODE_BIN" -e "try{new Intl.NumberFormat('zh-CN');console.log('ok')}catch(e){console.log('fail')}" 2>/dev/null || echo "fail")
+		if [ "$icu_test" = "ok" ]; then
+			log_info "Node.js ICU 运行正常 (small-icu)"
+			return 0
+		fi
+	fi
+
+	log_warn "ICU 数据缺失或不完整，正在修复..."
+
+	# 方法1: 安装 full-icu npm 包 (包含完整 ICU 数据)
+	ensure_mkdir "${NODE_BASE}/share/icu"
+	echo "  正在安装 full-icu 数据包..."
+	"$NPM_BIN" install -g full-icu --prefix="$OC_GLOBAL" 2>/dev/null
+
+	# 查找安装后的 icudt*.dat 文件
+	local icu_data_file
+	icu_data_file=$(find "$OC_GLOBAL" -name "icudt*.dat" 2>/dev/null | head -1)
+	if [ -n "$icu_data_file" ]; then
+		cp "$icu_data_file" "${NODE_BASE}/share/icu/" 2>/dev/null
+		log_info "ICU 数据已安装: $(basename "$icu_data_file")"
+		return 0
+	fi
+
+	# 方法2: 直接下载 ICU 数据文件
+	local node_major
+	node_major=$("$NODE_BIN" --version 2>/dev/null | sed 's/^v//' | cut -d. -f1)
+	local icu_version=""
+	case "$node_major" in
+		23) icu_version="77" ;;
+		22) icu_version="76" ;;
+		21) icu_version="74" ;;
+		20) icu_version="73" ;;
+		*)  icu_version="77" ;; # 默认尝试最新
+	esac
+
+	local icu_file="icudt${icu_version}l.dat"
+	local icu_mirror="https://github.com/nicolo-ribaudo/icu4c-data/releases/download/74.1/icu4c-74_1-data"
+
+	# 尝试从多个来源下载 ICU 数据
+	local icu_downloaded=0
+	local icu_urls="https://github.com/nicolo-ribaudo/icu4c-data/releases/download/74.1/icudt74l.dat"
+	icu_urls="$icu_urls https://unofficial-builds.nodejs.org/download/release/v${NODE_VERSION}/icu/icudt77l.dat"
+
+	for icu_url in $icu_urls; do
+		echo "  尝试下载 ICU 数据: $icu_url"
+		if curl -fSL --connect-timeout 10 --max-time 60 -o "${NODE_BASE}/share/icu/${icu_file}" "$icu_url" 2>/dev/null; then
+			local fsize=$(wc -c < "${NODE_BASE}/share/icu/${icu_file}" 2>/dev/null || echo 0)
+			if [ "$fsize" -gt 10000000 ] 2>/dev/null; then
+				icu_downloaded=1
+				break
+			else
+				rm -f "${NODE_BASE}/share/icu/${icu_file}" 2>/dev/null
+			fi
+		fi
+	done
+
+	if [ "$icu_downloaded" -eq 1 ]; then
+		log_info "ICU 数据下载成功: ${icu_file}"
+		return 0
+	fi
+
+	# 方法3: 尝试使用 Node.js 内置的 small ICU (如果 Intl 可用)
+	log_warn "无法下载完整 ICU 数据，将尝试使用 Node.js 内置 ICU"
+	log_warn "如果仍出现 ICU 错误，请手动下载 icudt*.dat 到 ${NODE_BASE}/share/icu/"
+	return 0
+}
+
 install_openclaw() {
 	echo ""
 	echo "=== 安装 OpenClaw ==="
@@ -321,23 +426,8 @@ install_openclaw() {
 	# 检查 git 是否可用 (openclaw 部分依赖可能使用 git:// 协议)
 	if ! command -v git >/dev/null 2>&1; then
 		log_warn "未检测到 git，正在尝试安装..."
-		local _git_installed=0
-		if command -v opkg >/dev/null 2>&1; then
-			# opkg update 有时会因镜像问题卡住，加超时保护
-			timeout 30 opkg update >/dev/null 2>&1 || true
-			# 先尝试安装 git (忽略 opkg 错误，避免触发 set -e)
-			if timeout 60 opkg install --force-depends git git-http >/dev/null 2>&1; then
-				_git_installed=1
-			fi
-			# 如果 git 安装失败，尝试仅安装 git（不带 git-http）
-			if [ "$_git_installed" -eq 0 ]; then
-				timeout 60 opkg install --force-depends git >/dev/null 2>&1 && _git_installed=1 || true
-			fi
-			# 最后尝试用 npm 安装 git (不依赖 opkg)
-			if [ "$_git_installed" -eq 0 ] && [ -x "$NPM_BIN" ]; then
-				"$NPM_BIN" install -g git >/dev/null 2>&1 && _git_installed=1 || true
-			fi
-		fi
+		opkg update >/dev/null 2>&1
+		opkg install git git-http 2>&1 | tail -3 || true
 		if command -v git >/dev/null 2>&1; then
 			log_info "git 安装成功"
 		else
@@ -349,13 +439,13 @@ install_openclaw() {
 	local npm_ok=0
 	if [ -x "$NPM_BIN" ]; then
 		ensure_mkdir "$OC_GLOBAL"
-		"$NPM_BIN" install -g "$oc_pkg" --prefix="$OC_GLOBAL" $install_flags 2>&1 | tail -10
+		NODE_ICU_DATA="${NODE_BASE}/share/icu" "$NPM_BIN" install -g "$oc_pkg" --prefix="$OC_GLOBAL" $install_flags 2>&1 | tail -10
 		# 检查是否安装成功
 		if [ -n "$(find_oc_entry)" ]; then
 			npm_ok=1
 		else
 			log_warn "首次安装未成功，尝试 --no-optional 模式重试..."
-			"$NPM_BIN" install -g "$oc_pkg" --prefix="$OC_GLOBAL" $install_flags --no-optional 2>&1 | tail -10
+			NODE_ICU_DATA="${NODE_BASE}/share/icu" "$NPM_BIN" install -g "$oc_pkg" --prefix="$OC_GLOBAL" $install_flags --no-optional 2>&1 | tail -10
 			[ -n "$(find_oc_entry)" ] && npm_ok=1
 		fi
 	elif [ -x "$PNPM_BIN" ]; then
@@ -454,12 +544,13 @@ do_setup() {
 	else
 		echo "  OpenClaw:   最新版"
 	fi
-	echo "  安装路径:   ${NODE_BASE}"
+	echo "  安装路径:   ${OC_INSTALL_PATH}"
 	echo "  数据路径:   ${OC_DATA}"
 	echo ""
 
 	download_node "$node_ver"
 	install_pnpm
+	fix_icu_data
 	install_openclaw
 	init_openclaw
 
@@ -508,10 +599,11 @@ do_check() {
 		echo "  配置:     未初始化"
 	fi
 
-	# 磁盘使用
+	# 磁盘使用 (检测实际安装路径)
 	local used
-	used=$(du -sh /opt/openclaw 2>/dev/null | awk '{print $1}')
+	used=$(du -sh "$OC_INSTALL_PATH" 2>/dev/null | awk '{print $1}')
 	echo "  磁盘:     ${used:-N/A}"
+	echo "  安装路径: ${OC_INSTALL_PATH}"
 
 	# libc 类型
 	echo "  C库:      $(detect_libc)"
@@ -666,7 +758,7 @@ do_setup_offline() {
 	echo "╚══════════════════════════════════════════════════════════════╝"
 	echo ""
 	echo "  架构:       $(uname -m)"
-	echo "  安装路径:   ${NODE_BASE}"
+	echo "  安装路径:   ${OC_INSTALL_PATH}"
 	echo "  数据路径:   ${OC_DATA}"
 	echo "  离线包:     ${offline_dir}"
 	echo ""
@@ -754,6 +846,7 @@ case "${1:-}" in
 		;;
 	node)
 		download_node "$NODE_VERSION"
+		fix_icu_data
 		;;
 	factory-reset)
 		do_factory_reset

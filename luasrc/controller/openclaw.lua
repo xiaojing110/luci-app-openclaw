@@ -12,6 +12,9 @@ function index()
 	-- 配置管理 (View — 嵌入 oc-config Web 终端)
 	entry({"admin", "services", "openclaw", "advanced"}, template("openclaw/advanced"), _("配置管理"), 20).leaf = true
 
+	-- 微信配置 (View — 微信渠道配置向导)
+	entry({"admin", "services", "openclaw", "wechat"}, template("openclaw/wechat"), _("微信配置"), 25).leaf = true
+
 	-- Web 控制台 (View — 嵌入 OpenClaw Web UI)
 	entry({"admin", "services", "openclaw", "console"}, template("openclaw/console"), _("Web 控制台"), 30).leaf = true
 
@@ -44,6 +47,67 @@ function index()
 
 	-- 系统配置检测 API (安装前检测)
 	entry({"admin", "services", "openclaw", "check_system"}, call("action_check_system"), nil).leaf = true
+
+	-- 微信状态 API (检测插件安装和登录状态)
+	entry({"admin", "services", "openclaw", "wechat_status"}, call("action_wechat_status"), nil).leaf = true
+
+	-- 微信插件安装 API (后台安装)
+	entry({"admin", "services", "openclaw", "wechat_install"}, call("action_wechat_install"), nil).leaf = true
+
+	-- 微信安装日志轮询 API
+	entry({"admin", "services", "openclaw", "wechat_install_log"}, call("action_wechat_install_log"), nil).leaf = true
+
+	-- 微信登录 API (启动登录流程)
+	entry({"admin", "services", "openclaw", "wechat_login"}, call("action_wechat_login"), nil).leaf = true
+
+	-- 微信登录状态/二维码 API
+	entry({"admin", "services", "openclaw", "wechat_login_status"}, call("action_wechat_login_status"), nil).leaf = true
+
+	-- 微信插件卸载 API
+	entry({"admin", "services", "openclaw", "wechat_uninstall"}, call("action_wechat_uninstall"), nil).leaf = true
+
+        -- 微信插件检测升级 API
+        entry({"admin", "services", "openclaw", "wechat_check_upgrade"}, call("action_wechat_check_upgrade"), nil).leaf = true
+
+        -- 微信插件升级 API
+        entry({"admin", "services", "openclaw", "wechat_upgrade_plugin"}, call("action_wechat_upgrade_plugin"), nil).leaf = true
+
+        -- 微信退出/删除账号 API
+        entry({"admin", "services", "openclaw", "wechat_logout"}, call("action_wechat_logout"), nil).leaf = true
+end-- ═══════════════════════════════════════════
+-- 获取实际安装路径 (辅助函数)
+-- ═══════════════════════════════════════════
+local function get_actual_install_path()
+	local sys = require "luci.sys"
+	local uci = require "luci.model.uci".cursor()
+
+	-- 从 UCI 读取用户配置的基础路径
+	local install_path_uci = uci:get("openclaw", "main", "install_path") or "/opt"
+	local uci_install_path = install_path_uci .. "/openclaw"
+
+	-- 方法1: 从运行中的 gateway 进程检测实际路径
+	local actual_path = sys.exec("ps w 2>/dev/null | grep -E 'openclaw.*gateway|openclaw-gateway' | grep -v grep | head -1"):gsub("%s+", "")
+	if actual_path and actual_path ~= "" then
+		local matched_path = actual_path:match("(/[^ ]+)/data/")
+		if matched_path and nixio.fs.stat(matched_path .. "/data/.openclaw/openclaw.json", "type") then
+			return matched_path
+		end
+	end
+
+	-- 方法2: 检查常见安装位置 (优先检查实际存在的配置)
+	local possible_paths = {
+		uci_install_path,  -- UCI 配置的路径
+		"/mnt/data/openclaw",  -- 常见的外置存储路径
+		"/opt/openclaw",   -- 默认路径
+	}
+	for _, p in ipairs(possible_paths) do
+		if nixio.fs.stat(p .. "/data/.openclaw/openclaw.json", "type") then
+			return p
+		end
+	end
+
+	-- 方法3: 如果都没找到，返回 UCI 配置的路径 (即使不存在，安装时会创建)
+	return uci_install_path
 end
 
 -- ═══════════════════════════════════════════
@@ -58,6 +122,9 @@ function action_status()
 	local pty_port = uci:get("openclaw", "main", "pty_port") or "18793"
 	local enabled = uci:get("openclaw", "main", "enabled") or "0"
 
+	-- 使用 get_actual_install_path 获取实际安装路径
+	local install_path = get_actual_install_path()
+
 	-- 验证端口值为纯数字，防止命令注入
 	if not port:match("^%d+$") then port = "18789" end
 	if not pty_port:match("^%d+$") then pty_port = "18793" end
@@ -66,6 +133,7 @@ function action_status()
 		enabled = enabled,
 		port = port,
 		pty_port = pty_port,
+		install_path = install_path,
 		gateway_running = false,
 		gateway_starting = false,
 		pty_running = false,
@@ -75,6 +143,7 @@ function action_status()
 		node_version = "",
 		oc_version = "",
 		plugin_version = "",
+		disk_free = "",
 	}
 
 	-- 插件版本
@@ -86,8 +155,8 @@ function action_status()
 
 	-- 安装方式检测 (离线 / 在线)
 
-	-- 检查 Node.js
-	local node_bin = "/opt/openclaw/node/bin/node"
+	-- 检查 Node.js (使用自定义安装路径)
+	local node_bin = install_path .. "/node/bin/node"
 	local f = io.open(node_bin, "r")
 	if f then
 		f:close()
@@ -95,11 +164,11 @@ function action_status()
 		result.node_version = node_ver
 	end
 
-	-- OpenClaw 版本 (从 package.json 读取)
+	-- OpenClaw 版本 (从 package.json 读取，使用自定义安装路径)
 	local oc_dirs = {
-		"/opt/openclaw/global/lib/node_modules/openclaw",
-		"/opt/openclaw/global/node_modules/openclaw",
-		"/opt/openclaw/node/lib/node_modules/openclaw",
+		install_path .. "/global/lib/node_modules/openclaw",
+		install_path .. "/global/node_modules/openclaw",
+		install_path .. "/node/lib/node_modules/openclaw",
 	}
 	for _, d in ipairs(oc_dirs) do
 		local pf = io.open(d .. "/package.json", "r")
@@ -131,8 +200,8 @@ function action_status()
 	local pty_check = sys.exec("netstat -tulnp 2>/dev/null | grep -c ':" .. pty_port .. " ' || echo 0"):gsub("%s+", "")
 	result.pty_running = (tonumber(pty_check) or 0) > 0
 
-	-- 读取当前活跃模型
-	local config_file = "/opt/openclaw/data/.openclaw/openclaw.json"
+	-- 读取当前活跃模型 (使用自定义安装路径)
+	local config_file = install_path .. "/data/.openclaw/openclaw.json"
 	local cf = io.open(config_file, "r")
 	if cf then
 		local content = cf:read("*a")
@@ -145,6 +214,9 @@ function action_status()
 
 		-- 读取已配置的渠道列表
 		local channels = {}
+		if content:match('"openclaw%-weixin"%s*:%s*{') then
+			channels[#channels+1] = "微信"
+		end
 		if content:match('"qqbot"%s*:%s*{') and content:match('"appId"%s*:%s*"[^"]+"') then
 			channels[#channels+1] = "QQ"
 		end
@@ -192,6 +264,13 @@ function action_status()
 		end
 	end
 
+	-- 磁盘剩余空间 (检测安装路径所在分区)
+	local install_parent = install_path:match("^(.*)/[^/]*$") or "/"
+	local df_output = sys.exec("df -h " .. install_parent .. " 2>/dev/null | tail -1 | awk '{print $4}'"):gsub("%s+", "")
+	if df_output and df_output ~= "" then
+		result.disk_free = df_output
+	end
+
 	http.prepare_content("application/json")
 	http.write_json(result)
 end
@@ -225,6 +304,8 @@ function action_service_ctl()
 		sys.exec("rm -f /tmp/openclaw-setup.log /tmp/openclaw-setup.pid /tmp/openclaw-setup.exit")
 		-- 获取用户选择的版本 (stable=指定版本, latest=最新版)
 		local version = http.formvalue("version") or ""
+		-- 获取自定义安装路径 (用户输入的是基础路径，如 /opt 或 /mnt/data)
+		local install_path = http.formvalue("install_path") or ""
 		local env_prefix = ""
 		if version == "stable" then
 			-- 稳定版: 读取 openclaw-env 中定义的 OC_TESTED_VERSION
@@ -236,6 +317,17 @@ function action_service_ctl()
 			-- 校验版本号格式 (仅允许数字、点、横线、字母)
 			if version:match("^[%d%.%-a-zA-Z]+$") then
 				env_prefix = "OC_VERSION=" .. version .. " "
+			end
+		end
+		-- 处理自定义安装路径
+		if install_path ~= "" and install_path ~= "/opt" then
+			-- 安全检查: 路径不能包含危险字符
+			install_path = install_path:gsub("[`$;&|<>]", "")
+			install_path = install_path:gsub("/+$", "")
+			if install_path ~= "" then
+				-- 保存到 UCI 配置 (保存用户输入的基础路径)
+				sys.exec("uci set openclaw.main.install_path='" .. install_path .. "'; uci commit openclaw 2>/dev/null")
+				env_prefix = env_prefix .. "OC_INSTALL_PATH='" .. install_path .. "' "
 			end
 		end
 		-- 后台安装，成功后自动启用并启动服务
@@ -368,6 +460,12 @@ end
 function action_uninstall()
 	local http = require "luci.http"
 	local sys = require "luci.sys"
+	local uci = require "luci.model.uci".cursor()
+
+	-- 获取安装路径
+	local install_path_uci = uci:get("openclaw", "main", "install_path") or "/opt"
+	-- 实际安装路径
+	local install_path = install_path_uci .. "/openclaw"
 
 	-- 停止服务
 	sys.exec("/etc/init.d/openclaw stop >/dev/null 2>&1")
@@ -376,7 +474,7 @@ function action_uninstall()
 	-- 设置 UCI enabled=0
 	sys.exec("uci set openclaw.main.enabled=0; uci commit openclaw 2>/dev/null")
 	-- 删除 Node.js + OpenClaw 运行环境 (包含所有插件: qqbot, 飞书等)
-	sys.exec("rm -rf /opt/openclaw")
+	sys.exec("rm -rf " .. install_path)
 	-- 清理旧数据迁移后可能残留的目录
 	sys.exec("rm -rf /root/.openclaw 2>/dev/null")
 	-- 清理临时文件
@@ -389,7 +487,7 @@ function action_uninstall()
 	http.prepare_content("application/json")
 	http.write_json({
 		status = "ok",
-		message = "运行环境已卸载。已清理: Node.js 运行环境 (/opt/openclaw)、所有插件 (qqbot/飞书等)、旧数据目录 (/root/.openclaw)、临时文件、LuCI 缓存。"
+		message = "运行环境已卸载。已清理: Node.js 运行环境 (" .. install_path .. ")、所有插件 (qqbot/飞书等)、旧数据目录 (/root/.openclaw)、临时文件、LuCI 缓存。"
 	})
 end
 
@@ -544,16 +642,21 @@ end
 function action_backup()
 	local http = require "luci.http"
 	local sys = require "luci.sys"
+	local uci = require "luci.model.uci".cursor()
 	local action = http.formvalue("action") or "create"
 
-	local node_bin = "/opt/openclaw/node/bin/node"
+	-- 获取安装路径
+	local install_path_uci = uci:get("openclaw", "main", "install_path") or "/opt"
+	-- 实际安装路径
+	local install_path = install_path_uci .. "/openclaw"
+	local node_bin = install_path .. "/node/bin/node"
 	local oc_entry = ""
 
-	-- 查找 openclaw 入口
+	-- 查找 openclaw 入口 (使用自定义安装路径)
 	local search_dirs = {
-		"/opt/openclaw/global/lib/node_modules/openclaw",
-		"/opt/openclaw/global/node_modules/openclaw",
-		"/opt/openclaw/node/lib/node_modules/openclaw",
+		install_path .. "/global/lib/node_modules/openclaw",
+		install_path .. "/global/node_modules/openclaw",
+		install_path .. "/node/lib/node_modules/openclaw",
 	}
 	for _, d in ipairs(search_dirs) do
 		if nixio.fs.stat(d .. "/openclaw.mjs", "type") then
@@ -572,14 +675,15 @@ function action_backup()
 	end
 
 	local env_prefix = string.format(
-		"HOME=/opt/openclaw/data OPENCLAW_HOME=/opt/openclaw/data " ..
-		"OPENCLAW_STATE_DIR=/opt/openclaw/data/.openclaw " ..
-		"OPENCLAW_CONFIG_PATH=/opt/openclaw/data/.openclaw/openclaw.json " ..
-		"PATH=/opt/openclaw/node/bin:/opt/openclaw/global/bin:$PATH "
+		"HOME=%s/data OPENCLAW_HOME=%s/data " ..
+		"OPENCLAW_STATE_DIR=%s/data/.openclaw " ..
+		"OPENCLAW_CONFIG_PATH=%s/data/.openclaw/openclaw.json " ..
+		"PATH=%s/node/bin:%s/global/bin:$PATH ",
+		install_path, install_path, install_path, install_path, install_path, install_path
 	)
 
 	-- 备份目录 (openclaw backup create 输出到 CWD，需要 cd)
-	local backup_dir = "/opt/openclaw/data/.openclaw/backups"
+	local backup_dir = install_path .. "/data/.openclaw/backups"
 	local cd_prefix = "mkdir -p " .. backup_dir .. " && cd " .. backup_dir .. " && "
 
 	-- ── 辅助: 解析单个备份文件的 manifest 信息 ──
@@ -646,7 +750,7 @@ function action_backup()
 		end
 		local output = sys.exec(backup_cmd)
 		-- 完整备份可能输出到 HOME，移动到 backup_dir
-		sys.exec("mv /opt/openclaw/data/*-openclaw-backup.tar.gz " .. backup_dir .. "/ 2>/dev/null")
+		sys.exec("mv " .. install_path .. "/data/*-openclaw-backup.tar.gz " .. backup_dir .. "/ 2>/dev/null")
 		-- 提取备份文件路径
 		local backup_path = output:match("([%S]+%.tar%.gz)")
 		http.prepare_content("application/json")
@@ -692,7 +796,7 @@ function action_backup()
 			http.write_json({ status = "error", message = "未找到备份文件，请先创建备份" })
 			return
 		end
-		local oc_data_dir = "/opt/openclaw/data/.openclaw"
+		local oc_data_dir = install_path .. "/data/.openclaw"
 		local config_path = oc_data_dir .. "/openclaw.json"
 
 		-- 1) 先验证备份中的 openclaw.json 是否有效
@@ -810,15 +914,25 @@ end
 -- ═══════════════════════════════════════════
 -- 系统配置检测 API (安装前检测)
 -- 检测内存和磁盘空间是否满足最低要求
--- 要求: 内存 > 1GB, 磁盘可用空间 > 1.5GB
+-- 要求: 内存 > 1GB, 磁盘可用空间 > 2GB (OpenClaw v2026.3.28+ 包体积约 200MB)
+-- 支持自定义安装路径，检测对应路径的磁盘空间
 -- ═══════════════════════════════════════════
 function action_check_system()
 	local http = require "luci.http"
 	local sys = require "luci.sys"
+	local uci = require "luci.model.uci".cursor()
 
-	-- 最低要求配置
+	-- 获取自定义安装路径 (用户输入的是基础路径，如 /opt 或 /mnt/data)
+	local install_path = http.formvalue("install_path") or uci:get("openclaw", "main", "install_path") or "/opt"
+	-- 安全检查: 路径不能包含危险字符
+	install_path = install_path:gsub("[`$;&|<>]", "")
+	-- 确保路径不以 / 结尾
+	install_path = install_path:gsub("/+$", "")
+	if install_path == "" then install_path = "/opt" end
+
+	-- 最低要求配置 (v2026.3.28: 包体积 ~200MB, 建议 2GB 可用空间)
 	local MIN_MEMORY_MB = 1024      -- 1GB
-	local MIN_DISK_MB = 1536        -- 1.5GB
+	local MIN_DISK_MB = 2048        -- 2GB
 
 	local result = {
 		memory_mb = 0,
@@ -826,6 +940,8 @@ function action_check_system()
 		disk_mb = 0,
 		disk_ok = false,
 		disk_path = "",
+		install_path = install_path,
+		disk_free_str = "",
 		pass = false,
 		message = ""
 	}
@@ -845,14 +961,40 @@ function action_check_system()
 	result.memory_ok = result.memory_mb >= MIN_MEMORY_MB
 
 	-- 检测磁盘可用空间
-	-- 优先检测 /opt 所在分区，如果 /opt 不存在则检测 /overlay 或 /
-	local disk_paths = {"/opt", "/overlay", "/"}
-	for _, path in ipairs(disk_paths) do
-		local df_output = sys.exec("df -m " .. path .. " 2>/dev/null | tail -1 | awk '{print $4}'"):gsub("%s+", "")
+	-- 策略: 从目标路径开始，逐级向上找到存在的挂载点进行检测
+	-- 例如: /mnt/data -> /mnt/data (若存在) -> /mnt (若存在) -> /
+	local function find_mount_point(path)
+		-- 如果路径存在，直接返回
+		if nixio.fs.stat(path, "type") then
+			return path
+		end
+		-- 逐级向上查找
+		while path ~= "/" and path ~= "" do
+			path = path:match("^(.*)/[^/]*$") or "/"
+			if path == "" then path = "/" end
+			if nixio.fs.stat(path, "type") then
+				return path
+			end
+		end
+		return "/"
+	end
+
+	local disk_check_path = find_mount_point(install_path)
+
+	-- 使用 df 检测磁盘空间
+	local df_output = sys.exec("df -m " .. disk_check_path .. " 2>/dev/null | tail -1 | awk '{print $4}'"):gsub("%s+", "")
+	if df_output and df_output ~= "" and tonumber(df_output) then
+		result.disk_mb = tonumber(df_output)
+		result.disk_path = disk_check_path
+		-- 获取可读的磁盘空间格式
+		result.disk_free_str = sys.exec("df -h " .. disk_check_path .. " 2>/dev/null | tail -1 | awk '{print $4}'"):gsub("%s+", "")
+	else
+		-- 如果检测失败，尝试检测根分区
+		df_output = sys.exec("df -m / 2>/dev/null | tail -1 | awk '{print $4}'"):gsub("%s+", "")
 		if df_output and df_output ~= "" and tonumber(df_output) then
 			result.disk_mb = tonumber(df_output)
-			result.disk_path = path
-			break
+			result.disk_path = "/"
+			result.disk_free_str = sys.exec("df -h / 2>/dev/null | tail -1 | awk '{print $4}'"):gsub("%s+", "")
 		end
 	end
 	result.disk_ok = result.disk_mb >= MIN_DISK_MB
@@ -876,4 +1018,537 @@ function action_check_system()
 
 	http.prepare_content("application/json")
 	http.write_json(result)
+end
+
+-- ═══════════════════════════════════════════
+-- 微信状态 API: 检测插件安装和登录状态
+-- ═══════════════════════════════════════════
+function action_wechat_status()
+	local http = require "luci.http"
+	local sys = require "luci.sys"
+	local uci = require "luci.model.uci".cursor()
+
+	-- 获取安装路径 (优先从运行环境检测)
+	local install_path_uci = uci:get("openclaw", "main", "install_path") or "/opt"
+	local install_path = install_path_uci .. "/openclaw"
+
+	-- 检测实际运行的安装路径 (通过查找 gateway 进程)
+	local actual_path = sys.exec("ps w 2>/dev/null | grep -E 'openclaw.*gateway|openclaw-gateway' | grep -v grep | head -1"):gsub("%s+", "")
+	if actual_path and actual_path ~= "" then
+		-- 从进程命令行提取路径
+		local matched_path = actual_path:match("(/[^ ]+)/data/")
+		if matched_path and nixio.fs.stat(matched_path, "type") then
+			install_path = matched_path
+		end
+	end
+
+	-- 也检查常见安装位置
+	local possible_paths = {
+		install_path,
+		"/mnt/data/openclaw",
+		"/opt/openclaw",
+	}
+	for _, p in ipairs(possible_paths) do
+		if nixio.fs.stat(p .. "/data/.openclaw/openclaw.json", "type") then
+			install_path = p
+			break
+		end
+	end
+
+	local result = {
+		plugin_installed = false,
+		logged_in = false,
+		accounts = {},
+		install_path = install_path
+	}
+
+	-- 检测微信插件是否已安装
+	local wechat_ext_dir = install_path .. "/data/.openclaw/extensions/openclaw-weixin"
+        local wechat_plugin_json = wechat_ext_dir .. "/openclaw.plugin.json"
+        local wechat_package_json = wechat_ext_dir .. "/package.json"
+
+        if nixio.fs.stat(wechat_plugin_json, "type") then
+                result.plugin_installed = true
+                -- 尝试读取版本号
+                if nixio.fs.stat(wechat_package_json, "type") then
+                        local pf = io.open(wechat_package_json, "r")
+                        if pf then
+                                local p_content = pf:read("*a")
+                                pf:close()
+                                local ver = p_content:match('"version"%s*:%s*"([^"]+)"')
+                                if ver then
+                                        result.plugin_version = ver
+                                end
+                        end
+                end
+        end        -- 从 openclaw.json 和 accounts.json 读取微信账号配置
+        local config_file = install_path .. "/data/.openclaw/openclaw.json"
+        local accounts_file = install_path .. "/data/.openclaw/openclaw-weixin/accounts.json"
+        
+        -- 新版 OpenClaw WeChat 插件状态读取
+        if nixio.fs.stat(accounts_file, "type") then
+                local af = io.open(accounts_file, "r")
+                if af then
+                        local content = af:read("*a")
+                        af:close()
+                        local count = 0
+                        for acc in content:gmatch('"([^"]+)"') do
+                                count = count + 1
+                                table.insert(result.accounts, {name = acc})
+                        end
+                        if count > 0 then
+                                result.logged_in = true
+                        end
+                end
+        end
+
+        local cf = io.open(config_file, "r")
+        if cf then
+                local content = cf:read("*a")
+                cf:close()
+
+                if content:match('"openclaw%-weixin"%s*:%s*{') then
+                        -- 兼容旧版
+                        local accounts_str = content:match('"accounts"%s*:%s*%[([^%]]*)%]')
+                        if accounts_str and accounts_str ~= "" then
+                                local count = 0
+                                for _ in accounts_str:gmatch('"wxid') do count = count + 1 end
+                                for _ in accounts_str:gmatch('"nickName"') do count = count + 1 end
+                                if count > 0 and not result.logged_in then
+                                        result.logged_in = true
+                                        result.accounts = {{name = "微信账号"}}
+                                end
+                        end
+
+                        if content:match('"credential"%s*:%s*{') and not result.logged_in then
+                                result.logged_in = true
+                                result.accounts = {{name = "微信账号"}}
+                        end
+                end
+        end	http.prepare_content("application/json")
+	http.write_json(result)
+end
+
+-- ═══════════════════════════════════════════
+-- 微信插件安装 API (后台安装)
+-- ═══════════════════════════════════════════
+function action_wechat_install()
+	local http = require "luci.http"
+	local sys = require "luci.sys"
+
+	local install_path = get_actual_install_path()
+	local node_bin = install_path .. "/node/bin/node"
+	local npx_bin = install_path .. "/node/bin/npx"
+	local oc_data = install_path .. "/data"
+	local node_base = install_path .. "/node"
+	local oc_global = install_path .. "/global"
+
+	-- 清理旧日志和状态
+	sys.exec("rm -f /tmp/openclaw-wechat-install.log /tmp/openclaw-wechat-install.pid /tmp/openclaw-wechat-install.exit")
+
+	-- 后台执行安装 (修复: 设置 NODE_ICU_DATA 解决 ICU 初始化问题)
+	local install_cmd = string.format(
+		"( " ..
+		"echo '开始安装微信插件...' > /tmp/openclaw-wechat-install.log; " ..
+		"echo '安装路径: %s' >> /tmp/openclaw-wechat-install.log; " ..
+		"echo 'Node: %s' >> /tmp/openclaw-wechat-install.log; " ..
+		"echo 'npx: %s' >> /tmp/openclaw-wechat-install.log; " ..
+		"cd %s && " ..
+		"su -s /bin/sh openclaw -c 'HOME=%s OPENCLAW_HOME=%s OPENCLAW_STATE_DIR=%s/.openclaw " ..
+		"NODE_ICU_DATA=%s/share/icu " ..
+		"PATH=%s/bin:%s/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin " ..
+		"%s -y @tencent-weixin/openclaw-weixin-cli install' >> /tmp/openclaw-wechat-install.log 2>&1; " ..
+		"RC=$?; echo $RC > /tmp/openclaw-wechat-install.exit; " ..
+		"if [ $RC -eq 0 ]; then echo '✅ 微信插件安装成功！' >> /tmp/openclaw-wechat-install.log; " ..
+		"else echo '❌ 安装失败 (exit: '$RC')' >> /tmp/openclaw-wechat-install.log; fi " ..
+		") & echo $! > /tmp/openclaw-wechat-install.pid",
+		install_path, node_bin, npx_bin,
+		oc_data, oc_data, oc_data, oc_data,
+		node_base, node_base, oc_global, npx_bin
+	)
+	sys.exec(install_cmd)
+
+	http.prepare_content("application/json")
+	http.write_json({ status = "ok", message = "微信插件安装已在后台启动..." })
+end
+
+-- ═══════════════════════════════════════════
+-- 微信安装日志轮询 API
+-- ═══════════════════════════════════════════
+function action_wechat_install_log()
+	local http = require "luci.http"
+	local sys = require "luci.sys"
+
+	local log = ""
+	local f = io.open("/tmp/openclaw-wechat-install.log", "r")
+	if f then
+		log = f:read("*a") or ""
+		f:close()
+	end
+
+	local running = false
+	local pid_file = io.open("/tmp/openclaw-wechat-install.pid", "r")
+	if pid_file then
+		local pid = pid_file:read("*a"):gsub("%s+", "")
+		pid_file:close()
+		if pid ~= "" then
+			local check = sys.exec("kill -0 " .. pid .. " 2>/dev/null && echo yes || echo no"):gsub("%s+", "")
+			running = (check == "yes")
+		end
+	end
+
+	local exit_code = -1
+	if not running then
+		local exit_file = io.open("/tmp/openclaw-wechat-install.exit", "r")
+		if exit_file then
+			local code = exit_file:read("*a"):gsub("%s+", "")
+			exit_file:close()
+			exit_code = tonumber(code) or -1
+		end
+	end
+
+	local state = "idle"
+	if running then
+		state = "running"
+	elseif exit_code == 0 then
+		state = "success"
+	elseif exit_code > 0 then
+		state = "failed"
+	end
+
+	http.prepare_content("application/json")
+	http.write_json({
+		status = "ok",
+		log = log,
+		state = state,
+		running = running,
+		exit_code = exit_code
+	})
+end
+
+-- ═══════════════════════════════════════════
+-- 微信登录 API (启动登录流程并获取二维码)
+-- ═══════════════════════════════════════════
+function action_wechat_login()
+	local http = require "luci.http"
+	local sys = require "luci.sys"
+
+	local install_path = get_actual_install_path()
+	local node_bin = install_path .. "/node/bin/node"
+	local oc_data = install_path .. "/data"
+	local oc_entry = ""
+
+	-- 查找 openclaw 入口
+	local search_dirs = {
+		install_path .. "/global/lib/node_modules/openclaw",
+		install_path .. "/global/node_modules/openclaw",
+		install_path .. "/node/lib/node_modules/openclaw",
+	}
+	for _, d in ipairs(search_dirs) do
+		if nixio.fs.stat(d .. "/openclaw.mjs", "type") then
+			oc_entry = d .. "/openclaw.mjs"
+			break
+		elseif nixio.fs.stat(d .. "/dist/cli.js", "type") then
+			oc_entry = d .. "/dist/cli.js"
+			break
+		end
+	end
+
+        if oc_entry == "" then
+                http.prepare_content("application/json")
+                http.write_json({ status = "error", message = "OpenClaw 未安装" })
+                return
+        end
+
+        -- 清理旧状态和可能的残留进程
+        sys.exec("kill -9 $(cat /tmp/openclaw-wechat-login.pid 2>/dev/null) 2>/dev/null")
+        sys.exec("pkill -f 'channels login --channel openclaw-weixin' 2>/dev/null")
+        sys.exec("rm -f /tmp/openclaw-wechat-qrcode.txt /tmp/openclaw-wechat-login.pid /tmp/openclaw-wechat-login.exit /tmp/openclaw-wechat-restarted")
+	-- 后台启动登录流程，将二维码输出到文件
+	local node_base = install_path .. "/node"
+	local oc_global = install_path .. "/global"
+	local login_cmd = string.format(
+		"( " ..
+		"echo '正在启动微信登录...' > /tmp/openclaw-wechat-qrcode.txt; " ..
+		"echo '安装路径: %s' >> /tmp/openclaw-wechat-qrcode.txt; " ..
+		"cd %s && " ..
+		"su -s /bin/sh openclaw -c 'HOME=%s OPENCLAW_HOME=%s OPENCLAW_STATE_DIR=%s/.openclaw OPENCLAW_CONFIG_PATH=%s/.openclaw/openclaw.json " ..
+		"NODE_ICU_DATA=%s/share/icu " ..
+		"PATH=%s/bin:%s/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin " ..
+		"%s %s channels login --channel openclaw-weixin' >> /tmp/openclaw-wechat-qrcode.txt 2>&1; " ..
+		"echo $? > /tmp/openclaw-wechat-login.exit; " ..
+		") >/dev/null 2>&1 & echo $! > /tmp/openclaw-wechat-login.pid",
+		install_path, oc_data, oc_data, oc_data, oc_data, oc_data,
+		node_base, node_base, oc_global, node_bin, oc_entry
+	)
+	sys.exec(login_cmd)
+
+	http.prepare_content("application/json")
+	http.write_json({ status = "ok", message = "微信登录流程已启动" })
+end
+
+-- ═══════════════════════════════════════════
+-- 微信登录状态/二维码 API
+-- ═══════════════════════════════════════════
+function action_wechat_login_status()
+	local http = require "luci.http"
+	local sys = require "luci.sys"
+
+	-- 读取二维码输出
+	local qrcode = ""
+	local f = io.open("/tmp/openclaw-wechat-qrcode.txt", "r")
+	if f then
+		qrcode = f:read("*a") or ""
+		f:close()
+	end
+
+	-- 检查进程状态
+	local running = false
+	local pid_file = io.open("/tmp/openclaw-wechat-login.pid", "r")
+	if pid_file then
+		local pid = pid_file:read("*a"):gsub("%s+", "")
+		pid_file:close()
+		if pid ~= "" then
+			local check = sys.exec("kill -0 " .. pid .. " 2>/dev/null && echo yes || echo no"):gsub("%s+", "")
+			running = (check == "yes")
+		end
+	end
+
+	local exit_code = -1
+	if not running then
+		local exit_file = io.open("/tmp/openclaw-wechat-login.exit", "r")
+		if exit_file then
+			local code = exit_file:read("*a"):gsub("%s+", "")
+			exit_file:close()
+			exit_code = tonumber(code) or -1
+		end
+	end
+
+        -- 提取最后生成的二维码 URL
+        local qrcode_url = ""
+        for url in qrcode:gmatch("https?://[^\n\r]+") do
+                qrcode_url = url
+        end	-- 检查是否登录成功
+	local logged_in = qrcode:find("登录成功") ~= nil or qrcode:find("成功登录") ~= nil or qrcode:find("Login success") ~= nil or qrcode:find("Logged in") ~= nil
+
+        local state = "idle"
+        if logged_in then
+                state = "success"
+        elseif running and qrcode_url ~= "" then
+                state = "qrcode"
+        elseif running then
+                state = "starting"
+        elseif exit_code == 0 then
+                state = "success"
+        elseif exit_code > 0 then
+                state = "failed"
+        end
+
+        -- 如果刚登录成功，触发一次重启，确保主进程加载微信
+        if state == "success" and not nixio.fs.stat("/tmp/openclaw-wechat-restarted", "type") then
+                sys.exec("touch /tmp/openclaw-wechat-restarted")
+                sys.exec("/etc/init.d/openclaw restart &")
+        end	http.prepare_content("application/json")
+	http.write_json({
+		status = "ok",
+		state = state,
+		qrcode = qrcode,
+		qrcode_url = qrcode_url,
+		running = running,
+		exit_code = exit_code,
+		logged_in = logged_in
+	})
+end
+
+-- ═══════════════════════════════════════════
+-- 微信插件卸载 API
+-- ═══════════════════════════════════════════
+function action_wechat_uninstall()
+	local http = require "luci.http"
+	local sys = require "luci.sys"
+
+	local install_path = get_actual_install_path()
+
+	-- 删除微信插件目录
+	local wechat_ext_dir = install_path .. "/data/.openclaw/extensions/openclaw-weixin"
+	if nixio.fs.stat(wechat_ext_dir, "type") then
+		sys.exec("rm -rf " .. wechat_ext_dir)
+	end
+
+	-- 从配置中删除微信相关配置
+	local config_file = install_path .. "/data/.openclaw/openclaw.json"
+	if nixio.fs.stat(config_file, "type") then
+		-- 读取配置
+		local cf = io.open(config_file, "r")
+		local content = ""
+		if cf then
+			content = cf:read("*a") or ""
+			cf:close()
+		end
+
+		-- 删除微信配置块 (简单字符串替换)
+		content = content:gsub(',?%s*"openclaw%-weixin"%s*:%s*%b{}', "")
+		content = content:gsub('"openclaw%-weixin"%s*:%s*%b{}%s*,?', "")
+
+		-- 写回配置
+		local wf = io.open(config_file, "w")
+		if wf then
+			wf:write(content)
+			wf:close()
+		end
+	end
+
+	-- 清理临时文件
+	sys.exec("rm -f /tmp/openclaw-wechat-*.log /tmp/openclaw-wechat-*.pid /tmp/openclaw-wechat-*.exit /tmp/openclaw-wechat-qrcode.txt")
+
+	http.prepare_content("application/json")
+	http.write_json({ status = "ok", message = "微信插件已卸载" })
+end
+
+-- ═══════════════════════════════════════════
+-- 微信插件检测升级 API
+-- ═══════════════════════════════════════════
+function action_wechat_check_upgrade()
+	local http = require "luci.http"
+	local sys = require "luci.sys"
+
+	local install_path = get_actual_install_path()
+	local npx_bin = install_path .. "/node/bin/npx"
+	local oc_data = install_path .. "/data"
+
+	-- 获取当前已安装版本
+	local current_version = ""
+	local wechat_ext_dir = install_path .. "/data/.openclaw/extensions/openclaw-weixin"
+	local plugin_json = wechat_ext_dir .. "/openclaw.plugin.json"
+	local pf = io.open(plugin_json, "r")
+	if pf then
+		local content = pf:read("*a") or ""
+		pf:close()
+		current_version = content:match('"version"%s*:%s*"([^"]+)"') or ""
+	end
+
+	-- 检测最新版本 (通过 npm view)
+	local latest_version = ""
+	local env_prefix = string.format(
+		"HOME=%s PATH=%s/node/bin:%s/global/bin:$PATH",
+		oc_data, install_path, install_path
+	)
+	local check_cmd = string.format(
+		"%s %s view @tencent-weixin/openclaw-weixin version 2>/dev/null",
+		env_prefix, npx_bin
+	)
+	latest_version = sys.exec(check_cmd):gsub("%s+", "")
+
+	local has_upgrade = false
+	if current_version ~= "" and latest_version ~= "" and current_version ~= latest_version then
+		has_upgrade = true
+	end
+
+	http.prepare_content("application/json")
+	http.write_json({
+		status = "ok",
+		current_version = current_version,
+		latest_version = latest_version,
+		has_upgrade = has_upgrade
+	})
+end
+
+-- ═══════════════════════════════════════════
+-- 微信插件升级 API (后台执行安装命令)
+-- ═══════════════════════════════════════════
+function action_wechat_upgrade_plugin()
+	local http = require "luci.http"
+	local sys = require "luci.sys"
+
+	local install_path = get_actual_install_path()
+	local npx_bin = install_path .. "/node/bin/npx"
+	local oc_data = install_path .. "/data"
+
+	-- 清理旧日志和状态
+	sys.exec("rm -f /tmp/openclaw-wechat-install.log /tmp/openclaw-wechat-install.pid /tmp/openclaw-wechat-install.exit")
+
+	-- 后台执行升级 (其实就是重新安装最新版)
+	local node_base = install_path .. "/node"
+	local oc_global = install_path .. "/global"
+	local upgrade_cmd = string.format(
+		"( " ..
+		"echo '正在升级微信插件...' > /tmp/openclaw-wechat-install.log; " ..
+		"echo '安装路径: %s' >> /tmp/openclaw-wechat-install.log; " ..
+		"cd %s && " ..
+		"su -s /bin/sh openclaw -c 'HOME=%s OPENCLAW_HOME=%s OPENCLAW_STATE_DIR=%s/.openclaw " ..
+		"NODE_ICU_DATA=%s/share/icu " ..
+		"PATH=%s/bin:%s/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin " ..
+		"%s -y @tencent-weixin/openclaw-weixin-cli install' >> /tmp/openclaw-wechat-install.log 2>&1; " ..
+		"RC=$?; echo $RC > /tmp/openclaw-wechat-install.exit; " ..
+		"if [ $RC -eq 0 ]; then echo '✅ 微信插件升级成功！' >> /tmp/openclaw-wechat-install.log; " ..
+		"else echo '❌ 升级失败 (exit: '$RC')' >> /tmp/openclaw-wechat-install.log; fi " ..
+		") & echo $! > /tmp/openclaw-wechat-install.pid",
+		install_path, oc_data, oc_data, oc_data, oc_data,
+		node_base, node_base, oc_global, npx_bin
+	)
+	sys.exec(upgrade_cmd)
+
+	http.prepare_content("application/json")
+	http.write_json({ status = "ok", message = "微信插件升级已在后台启动..." })
+end
+
+-- ═══════════════════════════════════════════
+-- 微信退出/删除账号 API
+-- ═══════════════════════════════════════════
+function action_wechat_logout()
+        local http = require "luci.http"
+        local sys = require "luci.sys"
+        local account_id = http.formvalue("account")
+
+        if not account_id or account_id == "" then
+                http.prepare_content("application/json")
+                http.write_json({ status = "error", message = "参数错误：未提供账号 ID" })
+                return
+        end
+
+        local install_path = get_actual_install_path()
+        local node_bin = install_path .. "/node/bin/node"
+        local oc_data = install_path .. "/data"
+        local oc_entry = ""
+
+        local search_dirs = {
+                install_path .. "/global/lib/node_modules/openclaw",
+                install_path .. "/global/node_modules/openclaw",
+                install_path .. "/node/lib/node_modules/openclaw",
+        }
+        for _, d in ipairs(search_dirs) do
+                if nixio.fs.stat(d .. "/openclaw.mjs", "type") then
+                        oc_entry = d .. "/openclaw.mjs"
+                        break
+                elseif nixio.fs.stat(d .. "/dist/cli.js", "type") then
+                        oc_entry = d .. "/dist/cli.js"
+                        break
+                end
+        end
+
+        if oc_entry == "" then
+                http.prepare_content("application/json")
+                http.write_json({ status = "error", message = "OpenClaw 未安装" })
+                return
+        end
+
+        -- 在后台执行 logout
+        local node_base = install_path .. "/node"
+        local oc_global = install_path .. "/global"
+        local logout_cmd = string.format(
+                "cd %s && su -s /bin/sh openclaw -c 'HOME=%s OPENCLAW_HOME=%s OPENCLAW_STATE_DIR=%s/.openclaw OPENCLAW_CONFIG_PATH=%s/.openclaw/openclaw.json " ..
+                "NODE_ICU_DATA=%s/share/icu " ..
+                "PATH=%s/bin:%s/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin " ..
+                "%s %s channels logout --channel openclaw-weixin --account \"%s\"'",
+                oc_data, oc_data, oc_data, oc_data, oc_data,
+                node_base, node_base, oc_global, node_bin, oc_entry, account_id
+        )
+
+        sys.exec(logout_cmd .. " >/dev/null 2>&1")
+        
+        -- 重启服务
+        sys.exec("/etc/init.d/openclaw restart &")
+
+        http.prepare_content("application/json")
+        http.write_json({ status = "ok", message = "已下线账号: " .. account_id })
 end
